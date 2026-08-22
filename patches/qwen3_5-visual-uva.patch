@@ -1,0 +1,123 @@
+CPU-resident vision tower for Qwen3.8-27B (vLLM 0.27.1).
+
+Qwen3.8 is a VL checkpoint: the Qwen3_5ForConditionalGeneration target model
+carries a 921 MB BF16 vision tower (27-layer ViT, hidden 1152).
+--language-model-only drops it entirely; without this patch there is no way
+to keep the *tower* out of the GPU selectively. vLLM's built-in offloader
+(UVAOffloader: --offload-backend uva --cpu-offload-gb N
+--cpu-offload-params <segments>) only wraps modules built through
+make_layers() (the decoder), and its segment matching runs against names
+*relative to the wrapped module* - so the tower, one module constructed
+directly in __init__ with names like blocks.N / merger / patch_embed, can
+never match "visual" from the CLI. (The non-selective budget mode is worse:
+it takes the first N GB of *decoder* layers, i.e. exactly the weights read
+on every decode step.)
+
+The patch routes the tower through the same UVAOffloader once
+load_weights() is done: weights move to pinned CPU memory and the GPU
+dereferences them over PCIe (zero-copy UVA view) whenever the encoder runs.
+The tower only executes during image prefill, never per decode step. On this
+3090/WSL2 box a 768x512 image's warm TTFT was ~1.42 s with UVA vs ~0.45 s
+with GPU weights (image/interconnect dependent); the KV pool keeps the ~0.9
+GB the tower weights would otherwise occupy, while encoder profile/cache
+still consume some GPU memory. That is what lets CTX=fast
+(bf16 KV, 64 KB per token) run with vision and still hold the full 65,536
+context: the measured pool is 72,475 tokens, and the tower on the GPU would
+shrink it to ~56k, which does not fit 64k.
+
+Only active when the server is started with UVA offloading and exactly
+--cpu-offload-params visual (--offload-backend uva --cpu-offload-gb > 0); on
+a pure-text start it is a no-op, and visual matches no decoder parameter, so the
+built-in offloader's LLM side stays empty either way. If the UVA view is
+unavailable (e.g. VLLM_WSL2_ENABLE_PIN_MEMORY unset, or
+VLLM_WEIGHT_OFFLOADING_DISABLE_UVA=1), UVAOffloader falls back to copying
+the tower to the GPU per forward - still prefill-only, ~40-60 ms per image
+on this box.
+
+MTP and DFlash2 speculation are both covered: they use
+Qwen3_5ForConditionalGeneration as the target model (the MTP draft module
+carries no visual). Not patched: Qwen3_5MoeForConditionalGeneration
+(MoE checkpoints only; the same ten lines would port).
+
+Apply from the repo root:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/qwen3_5-visual-uva.patch
+--- a/model_executor/models/qwen3_5.py
++++ b/model_executor/models/qwen3_5.py
+@@ -475,6 +475,7 @@
+         )
+         self.visual_dim = config.vision_config.out_hidden_size
+         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
++        self.vllm_config = vllm_config
+ 
+         with self._mark_tower_model(vllm_config, {"image", "video"}):
+             self.visual = Qwen3_VisionTransformer(
+@@ -568,7 +569,68 @@
+             self,
+             skip_prefixes=["mtp."],
+         )
+-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
++        result = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
++        self._offload_visual_tower()
++        return result
++
++    def _offload_visual_tower(self) -> None:
++        """Move the BF16 vision tower to CPU memory after weight loading.
++
++        vLLM's built-in offloader only wraps modules built through
++        make_layers() (the decoder), and --cpu-offload-params matches on
++        relative parameter names, so the tower - one module constructed
++        directly in __init__, with names like blocks.N / merger /
++        patch_embed - can never be selected from the CLI. This routes it
++        through the same UVAOffloader once all weights are in place:
++        parameters move to pinned CPU memory and the GPU dereferences them
++        over PCIe (zero-copy UVA) whenever the encoder runs. The tower only
++        executes during image prefill, never per decode step. On this
++        3090/WSL2 box a 768x512 image's warm TTFT was ~1.42 s with UVA vs
++        ~0.45 s with GPU weights (image/interconnect dependent); the KV
++        pool keeps the ~0.9 GB tower-weight allocation, while encoder
++        profile/cache still consume some GPU memory. No-op unless the
++        server was started with UVA offloading (the repo's start script
++        does that for VISION=uva); pure-text servers are unaffected.
++        """
++        if getattr(self, "_visual_tower_offloaded", False):
++            return
++
++        offload_config = self.vllm_config.offload_config
++        if offload_config is None:
++            return
++        backend = offload_config.offload_backend
++        if backend == "auto" and offload_config.uva.cpu_offload_gb > 0:
++            backend = "uva"
++        if backend != "uva":
++            return
++        # This dedicated wrapper has its own byte counter. Restrict it to the
++        # repo's visual-only configuration so the CLI budget cannot be spent
++        # once by the global decoder offloader and again by this tower wrapper.
++        # It also keeps --cpu-offload-params experts (for example) from
++        # unexpectedly moving the vision tower.
++        if offload_config.uva.cpu_offload_params != {"visual"}:
++            return
++        from vllm.model_executor.offloader.uva import UVAOffloader
++
++        budget = int(offload_config.uva.cpu_offload_gb * 1024**3)
++        tower_bytes = sum(p.numel() * p.element_size() for p in self.visual.parameters())
++        if budget < tower_bytes:
++            required_gib = tower_bytes / 1024**3
++            raise ValueError(
++                f"Visual UVA budget is too small: --cpu-offload-gb must be "
++                f">= {required_gib:.2f} GiB (got "
++                f"{offload_config.uva.cpu_offload_gb:.2f})"
++            )
++
++        offloader = UVAOffloader(
++            cpu_offload_max_bytes=budget,
++            # Empty set = every parameter of the wrapped module. The CLI's
++            # "visual" segment would not match the tower's relative names,
++            # so scope the wrapper to the tower itself instead.
++            cpu_offload_params=set(),
++        )
++        offloader.wrap_modules(iter((self.visual,)))
++        self._visual_tower_offloaded = True
+ 
+     @classmethod
+     def get_mamba_state_dtype_from_config(

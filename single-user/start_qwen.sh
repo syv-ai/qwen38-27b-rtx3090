@@ -60,6 +60,32 @@ API_SERVERS=${API_SERVERS:-1}
 #           falling from 2.56 to 2.38 tokens per step. Take it when the request
 #           would not otherwise fit, not for speed (see docs/long-context.md).
 CTX=${CTX:-fast}
+# VISION: where the 921 MB BF16 vision tower lives (Qwen3.8 is a VL checkpoint).
+#  auto (recommended when you want images): CTX=long -> gpu, otherwise uva.
+#  gpu: tower in VRAM. On tested CTX=long starts the KV pool is ~182-183k
+#       vs ~210k with VISION=0, so the full 150k max still
+#       fits. Explicit gpu on CTX=fast remains conservative at 54k.
+#  uva: tower in pinned CPU RAM (patches/qwen3_5-visual-uva.patch); only the
+#       encoder profile/cache stays on GPU (long pool: 206,632). A 768x512
+#       image added ~0.97 s warm TTFT vs gpu on this WSL2 box (hardware/image
+#       dependent), but text requests never read the tower.
+#  0 (default): pure text, --language-model-only, all published numbers hold.
+# Both tower modes cap images at 1M pixels (1024 visual tokens each), allow up
+# to VISION_IMAGES=4 images and disable video by default (VISION_VIDEOS=0).
+# The checkpoint's 16.7M-pixel / 768-frame defaults are unsafe on 24 GB.
+VISION=${VISION:-0}
+[ "$VISION" = auto ] && { [ "$CTX" = long ] && VISION=gpu || VISION=uva; }
+case "$VISION" in
+  0) VISION_ARGS="--language-model-only" ;;
+  gpu|uva)
+    VISION_ARGS="--limit-mm-per-prompt {\"image\":${VISION_IMAGES:-4},\"video\":${VISION_VIDEOS:-0}} --mm-processor-kwargs {\"max_pixels\":1048576}"
+    [ "$VISION" = uva ] &&
+      VISION_ARGS="$VISION_ARGS --offload-backend uva --cpu-offload-gb ${UVA_GB:-2} --cpu-offload-params visual"
+    [ "$CTX" = huge ] && [ "$VISION" = gpu ] &&
+      echo "VISION=gpu on CTX=huge: the KVarN pool is a 15% fraction of free memory, so the ~1 GB tower shrinks it - check the pool printed at startup and lower MAX_LEN if 200k no longer fits" >&2
+    ;;
+  *) echo "VISION must be 0, auto, gpu or uva (got: $VISION)" >&2; exit 1 ;;
+esac
 # SPEC=mtp (default): Qwen's own MTP head, k drafts chained (the numbers above).
 # SPEC=dflash2: the DFlash2 block drafter (incoai/Qwen3.8-27B-DFlash2, requantized
 #   to W4A16 by this repo: prepare/fetch_dflash2.py), 7 drafts in ONE non-autoregressive
@@ -71,7 +97,9 @@ SPEC=${SPEC:-mtp}
 # SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
 # (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
 if [ "$CTX" = "fast" ]; then
-  MAX_LEN=${MAX_LEN:-65536}
+  # 65,536 fits the measured 68,605-token DFlash2 bf16 pool with VISION=uva;
+  # explicit VISION=gpu is not a shipped preset and conservatively drops to 54k.
+  MAX_LEN=${MAX_LEN:-$([ "$VISION" = gpu ] && echo 54000 || echo 65536)}
   DRAFT_TOKENS=${DRAFT_TOKENS:-4}
   ATTN_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype bfloat16"
   export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
@@ -81,6 +109,8 @@ elif [ "$CTX" = "huge" ]; then
   ATTN_ARGS="--kv-cache-dtype kvarn_k4v2_g128 --block-size 128"
   export KVARN_POOL_MEM_FRAC=${KVARN_POOL_MEM_FRAC:-0.15}
 else
+  # Measured at 0.93 util + PREFIX_CACHE=1: pool ~210k with VISION=0,
+  # ~207k with UVA, ~182-183k with the 1M-pixel GPU tower. Full 150k fits.
   MAX_LEN=${MAX_LEN:-150000}
   DRAFT_TOKENS=${DRAFT_TOKENS:-3}
   ATTN_ARGS="--kv-cache-dtype fp8"
@@ -293,7 +323,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-model-len $MAX_LEN \
   --max-num-seqs $MAX_SEQS \
   --api-server-count $API_SERVERS \
-  --language-model-only \
+  $VISION_ARGS \
   $ATTN_ARGS \
   --mamba-ssm-cache-dtype float16 \
   ${ASYNC_ARGS} \

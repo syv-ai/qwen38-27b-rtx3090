@@ -340,3 +340,19 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     instead of length; `bench/labd_bench.py` sends two warm-ups on `doc[:4000]`,
     which arms the trigger for everything after it. `bench/bugb_sweep.py` prints
     the `mod 128` column for this.
+
+14. **The vision tower cannot be selected by vLLM's built-in offloader.**
+    `--cpu-offload-params` only matches modules built through `make_layers()`
+    (the decoder), on names *relative to the wrapped module* — the Qwen3.5
+    tower is one module constructed directly in `__init__` (names
+    `blocks.N` / `merger` / `patch_embed`), so it can never match `visual`
+    from the CLI, and a bare `--cpu-offload-gb N` takes the first N GB of
+    decoder layers — exactly the weights read on every decode step.
+    `patches/qwen3_5-visual-uva.patch` routes the tower through the same
+    UVAOffloader after `load_weights` (what `VISION=uva` in the single-user
+    script uses); it is a no-op on pure-text servers. Related trap: any
+    vision-enabled start must cap `max_pixels` (the script sets 1M) and the
+    modality counts (four images, video disabled by default). The checkpoint's
+    16.7M-pixel / 768-frame defaults make profiling and request memory unsafe
+    on 24 GB; enable video only with an explicit small `VISION_VIDEOS` plus
+    frame/size limits.
