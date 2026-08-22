@@ -338,6 +338,26 @@ ASYNC_ARGS=$([ "${ASYNC_SCHED:-1}" = 1 ] && echo --async-scheduling || echo --no
 TOOL_PARSER=${TOOL_PARSER:-qwen3_coder}
 TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
 
+# Vision. --language-model-only drops the vision tower cleanly -- no weights loaded,
+# 0.858 GiB on this checkpoint (gotcha 9) -- and stays the default. VISION=1 keeps
+# the tower, for a client that sends images: screenshots into a coding assistant,
+# captioning, document photos.
+#
+# Only --language-model-only needs a knob. It is hardcoded in the exec line below, so
+# the alternative is countering it with --no-language-model-only from EXTRA_ARGS and
+# depending on which flag argparse saw last -- which regresses silently: images are
+# still accepted and still counted as prompt tokens, and the model answers from
+# placeholder embeddings. The two flags VISION=1 adds have no such conflict and can
+# be overridden from EXTRA_ARGS, which is expanded after them. The pixel cap is
+# shipped rather than left to the processor default because vLLM profiles the encoder
+# at the largest image it will accept, and that peak comes out of the KV pool:
+# 2097152 px = 2048 image tokens.
+if [ "${VISION:-0}" = 1 ]; then
+  VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
+else
+  VISION_ARGS="--language-model-only"
+fi
+
 export PATH="$REPO/venv/bin:$PATH"
 # Overridable: expandable_segments needs CUDA VMM, which WSL2's paravirt
 # driver rejects ("CUDA driver error: device not ready" during Marlin repack)
@@ -356,7 +376,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-model-len $MAX_LEN \
   --max-num-seqs $MAX_SEQS \
   --api-server-count $API_SERVERS \
-  --language-model-only \
+  ${VISION_ARGS} \
   $ATTN_ARGS \
   --mamba-ssm-cache-dtype float16 \
   ${ASYNC_ARGS} \

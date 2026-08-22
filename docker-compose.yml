@@ -6,7 +6,7 @@
 #   docker compose run --rm single verify     # verify.sh inside the container
 #
 # Knobs go in a .env file next to this file (never committed): VLLM_API_KEY=...,
-# and any of the start-script variables (CTX, KV, MAX_LEN, MAX_SEQS, GPU_UTIL,
+# and any of the start-script variables (CTX, KV, MAX_LEN, MAX_SEQS, GPU_UTIL, VISION,
 # SPEC_ATTN, DRAFT_TOKENS, EXTRA_ARGS, ...) — .env is passed straight into the
 # container. Fastest single-user decode, if the card is yours alone (README,
 # "If you are the only user"; the drafter it needs is already downloaded by
