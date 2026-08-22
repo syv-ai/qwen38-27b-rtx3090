@@ -322,6 +322,9 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-num-seqs $MAX_SEQS \
   --api-server-count $API_SERVERS \
   --language-model-only \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --enable-prefix-caching \
   $ATTN_ARGS \
   --mamba-ssm-cache-dtype float16 \
   ${ASYNC_ARGS} \

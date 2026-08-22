@@ -1,0 +1,33 @@
+cat << 'EOF' > patches/wsl2-uva-fallback.patch
+--- a/v1/worker/gpu/buffer_utils.py
++++ b/v1/worker/gpu/buffer_utils.py
+@@ -43,9 +43,12 @@
+ class UvaBuffer:
+     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
+-        if not is_uva_available():
+-            raise RuntimeError("UVA is not available")
+         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+         self.np = self.cpu.numpy()
+-        self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
++        if is_uva_available():
++            self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
++            self._has_uva = True
++        else:
++            self.uva = torch.zeros(size, dtype=dtype, device="cuda")
++            self._has_uva = False
+ 
+ 
+@@ -74,3 +77,5 @@
+         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
+         n = len(x)
+         dst[:n] = x
++        if not getattr(buf, "_has_uva", True):
++            buf.uva[:n].copy_(buf.cpu[:n], non_blocking=True)
+         return buf.uva[:n]
+@@ -140,4 +145,4 @@
+-        if not uva_instead_of_gpu:
++        if not uva_instead_of_gpu or not is_uva_available():
+             # Create a GPU tensor (default)
+             self.gpu = torch.zeros(size, dtype=dtype, device=device)
+         else:
+EOF
