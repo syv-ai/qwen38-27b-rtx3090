@@ -1,0 +1,163 @@
+Keep the vision tower's weights in host RAM (vLLM 0.27.1).
+
+VISION=1 loads model.visual.* -- 878.8 MiB of BF16 on this checkpoint, of which
+blocks are 784.8 and merger 85.5 -- and on a 24 GB card shared with a desktop
+compositor that is most of the headroom the single-user configs run on. vLLM can
+already offload weights to pinned host memory, but the offloader is installed only
+in make_layers() (model_executor/models/utils.py), which the language decoder
+layers use and the ViT does not: Qwen3_VisionTransformer builds self.blocks as a
+plain nn.ModuleList. So --cpu-offload-gb cannot reach the tower, and setting it
+spends the budget on language layers instead, which puts PCIe in the decode loop.
+
+This routes the tower's blocks and merger through their own UVAOffloader --
+dedicated, so it never competes with --cpu-offload-gb -- with the zero-copy mode
+turned off, leaving the bulk-copy path: each module is copied H2D once per forward
+and freed. patch_embed and pos_embed (8.5 MiB) stay resident, so visual.device and
+visual.dtype still report cuda.
+
+VLLM_VISION_CPU_OFFLOAD_GB is the budget in GiB; 0 (default) changes nothing.
+1 covers the whole tower. Registered in envs.py so validate_environ() does not
+warn about it. VISION_OFFLOAD in either start script sets it, defaulting to on.
+
+On 24 GB this is what makes SPEC=dflash2 + VISION=1 possible at all. Without it
+that config dies in graph capture -- torch.OutOfMemoryError: Tried to allocate
+960.00 MiB ... 787.50 MiB is free, at spec_decode_attn.py:184 (the split-KV
+verify part_o buffer) -- because the dflash2 pool is pinned by bytes, so the
+tower comes out of the ~1.1 GiB transient margin and is 0.85 of it. With the
+offload the same config comes up at its full 69,758-token pool and reads images.
+SPEC=mtp boots either way.
+
+Measured on an RTX 3090 at PCIe 4.0 x16, one 8192-patch image (the 2048-image-token
+cap both start scripts ship), median of 10 forwards, isolated tower:
+
+  VLLM_VISION_CPU_OFFLOAD_GB   weights on GPU   peak alloc   forward
+  0 (stock)                       891.3 MiB     1160.5 MiB    296 ms
+  1                                 9.0 MiB      308.2 MiB    333 ms
+
+Bit-exact against the resident tower (same state_dict, torch.equal on the output).
+Do NOT leave the UVA zero-copy path on for this: same memory, but 3327 ms per
+image, because the GEMMs then re-read operand tiles over PCIe in the inner loop.
+
+Applies after speed-knobs-envs.patch and marlin-int8-layer-select.patch, which
+also touch envs.py (disjoint hunks, and glob order puts this one last):
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/vision-tower-cpu-offload.patch
+
+--- a/envs.py
++++ b/envs.py
+@@ -188,6 +188,9 @@
+     VLLM_MARLIN_TUNE_DIR: str = ""
+     VLLM_SPEC_DECODE_ATTN: bool = False
+     VLLM_DRAFT_TOPK_TOPP: bool = True
++    # syv patch: GiB of vision-tower weights to keep in pinned host memory
++    # (patches/vision-tower-cpu-offload.patch). 0 disables.
++    VLLM_VISION_CPU_OFFLOAD_GB: float = 0.0
+     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
+     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
+     VLLM_V1_USE_OUTLINES_CACHE: bool = False
+@@ -1480,6 +1483,9 @@
+     "VLLM_MARLIN_TUNE_DIR": lambda: os.environ.get("VLLM_MARLIN_TUNE_DIR", ""),
+     "VLLM_SPEC_DECODE_ATTN": lambda: os.environ.get("VLLM_SPEC_DECODE_ATTN", "0") == "1",
+     "VLLM_DRAFT_TOPK_TOPP": lambda: os.environ.get("VLLM_DRAFT_TOPK_TOPP", "1") == "1",
++    "VLLM_VISION_CPU_OFFLOAD_GB": lambda: float(
++        os.environ.get("VLLM_VISION_CPU_OFFLOAD_GB", "0")
++    ),
+     # The activation dtype config for humming kernel
+     "VLLM_HUMMING_INPUT_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
+         os.environ.get("VLLM_HUMMING_INPUT_QUANT_CONFIG", None)
+--- a/model_executor/models/qwen3_vl.py
++++ b/model_executor/models/qwen3_vl.py
+@@ -48,6 +48,7 @@
+ )
+ from transformers.video_utils import VideoMetadata
+ 
++import vllm.envs as envs
+ from vllm.compilation.decorators import support_torch_compile
+ from vllm.config import VllmConfig
+ from vllm.config.multimodal import (
+@@ -596,6 +597,40 @@
+             rope_parameters={"partial_rotary_factor": 0.5},
+         )
+ 
++        # syv patch: with VLLM_VISION_CPU_OFFLOAD_GB>0 the tower's weights live in
++        # pinned host memory and each module is copied to the GPU for the duration of
++        # its own forward, so the ViT costs ~0 resident VRAM while its GEMMs still run
++        # on the GPU (see the path note below). blocks (784.8 MiB on the
++        # Qwen3.8-27B AutoRound checkpoint) and merger (85.5 MiB) are 99% of the
++        # tower's 878.8 MiB; patch_embed and pos_embed stay resident, because 8.5 MiB
++        # is not worth putting an embedding gather on the PCIe bus.
++        #
++        # A dedicated offloader, NOT get_offloader(): the global one shares its byte
++        # budget with the language decoder layers (make_layers), so --cpu-offload-gb
++        # would spend it on whichever modules are built first and put PCIe in the
++        # decode hot loop. This one only ever sees the tower.
++        vision_offloader = None
++        if envs.VLLM_VISION_CPU_OFFLOAD_GB > 0:
++            from vllm.model_executor.offloader.uva import UVAOffloader
++
++            vision_offloader = UVAOffloader(
++                int(envs.VLLM_VISION_CPU_OFFLOAD_GB * 1024**3)
++            )
++            # Force the bulk-copy path (functional_call + .to(device) per module)
++            # instead of UVA zero-copy. Measured on a 3090 at PCIe 4.0 x16, one
++            # 8192-patch image (the 2048-image-token cap the start scripts ship),
++            # median of 10 forwards:
++            #   resident weights   296 ms   891 MiB weights, 1160 MiB peak
++            #   bulk copy          333 ms     9 MiB weights,  308 MiB peak
++            #   UVA zero-copy     3327 ms     9 MiB weights,  278 MiB peak
++            # Zero-copy leaves the GEMMs reading operand tiles over PCIe in the
++            # inner loop, which re-reads each tile and lands at ~290 MB/s effective
++            # -- 11x slower than just keeping the weights resident. The copy path
++            # moves each module once, contiguously, at bulk PCIe rate: +36 ms.
++            # Set on the instance rather than via VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
++            # so this does not change what --cpu-offload-gb does elsewhere.
++            vision_offloader.uva_offloading = False
++
+         self.merger = Qwen3_VisionPatchMerger(
+             d_model=vision_config.out_hidden_size,
+             context_dim=self.hidden_size,
+@@ -604,6 +639,8 @@
+             quant_config=quant_config,
+             prefix=f"{prefix}.merger",
+         )
++        if vision_offloader is not None:
++            vision_offloader.wrap_modules(iter([self.merger]))
+ 
+         self.deepstack_merger_list = nn.ModuleList(
+             [
+@@ -625,19 +662,24 @@
+             dtype=torch.get_default_dtype(),
+         )
+ 
++        # syv patch: a generator, so UVAOffloader.wrap_modules can offload each block as
++        # it is built and stop exactly at the byte budget (see the merger above).
++        blocks_iter = (
++            Qwen3_VisionBlock(
++                dim=self.hidden_size,
++                num_heads=self.num_heads,
++                mlp_hidden_dim=vision_config.intermediate_size,
++                act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
++                norm_layer=norm_layer,
++                quant_config=quant_config,
++                prefix=f"{prefix}.blocks.{layer_idx}",
++            )
++            for layer_idx in range(vision_config.depth)
++        )
+         self.blocks = nn.ModuleList(
+-            [
+-                Qwen3_VisionBlock(
+-                    dim=self.hidden_size,
+-                    num_heads=self.num_heads,
+-                    mlp_hidden_dim=vision_config.intermediate_size,
+-                    act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
+-                    norm_layer=norm_layer,
+-                    quant_config=quant_config,
+-                    prefix=f"{prefix}.blocks.{layer_idx}",
+-                )
+-                for layer_idx in range(vision_config.depth)
+-            ]
++            vision_offloader.wrap_modules(blocks_iter)
++            if vision_offloader is not None
++            else list(blocks_iter)
+         )
+ 
+     @property

@@ -55,6 +55,29 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
    between those two starts, which is the same run-to-run swing the V2 runner
    shows, so read the pool difference as noise rather than as a measurement of
    what the tower costs.
+
+   On `SPEC=dflash2` that 0.858 GiB is not optional headroom, it is the difference
+   between booting and not. Measured here on a 3090 at 250 W, `SPEC=dflash2 VISION=1
+   VISION_OFFLOAD=0`, `CTX=fast`: the engine dies in graph capture with
+   `torch.OutOfMemoryError: Tried to allocate 960.00 MiB ... 787.50 MiB is free`
+   (`spec_decode_attn.py:184`, the split-KV verify `part_o` buffer). The pool there is
+   pinned by bytes (`KV_MEM`), so the tower cannot come out of the KV cache — it comes
+   out of the ~1.1 GiB transient margin, and it is 0.85 of it. `VISION_OFFLOAD=1` (the
+   default) makes the same config come up at the full 69,758-token pool and read images.
+   The `SPEC=mtp` path has no such problem: it boots either way, and there the pool is
+   profiling-sized, so what the tower costs is buried in the ±0.87 GiB profiling swing
+   above (79,271 against 80,055 tokens across the pair — 1%, i.e. noise).
+
+   What `VISION_OFFLOAD=1` does: the tower's weights live in pinned host RAM and each
+   module is copied to the GPU for the duration of its own forward
+   (`patches/vision-tower-cpu-offload.patch`). Isolated-tower measurement, RTX 3090 at
+   PCIe 4.0 x16, one 8192-patch image, median of 10 forwards: resident weights 891.3 ->
+   9.0 MiB, peak allocation 1160.5 -> 308.2 MiB, encode 296 -> 333 ms, output bit-exact
+   against the resident tower. Note which offload path that is: vLLM's UVA *zero-copy*
+   mode saves the same memory and costs 3327 ms, because the GEMMs then re-read operand
+   tiles over PCIe inside the inner loop. The patch forces the bulk-copy path and does
+   not touch what `--cpu-offload-gb` does elsewhere -- which could not reach the tower
+   anyway, since the offloader is only installed in `make_layers()`.
 10. **`prompt_logprobs` on long prompts OOMs the engine at 0.972 utilization**
     (a 300-token prompt needs ~300 MB of fp32 logits and there is no headroom).
     Run quality checks at 0.93.
