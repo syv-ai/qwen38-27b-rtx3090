@@ -1,0 +1,301 @@
+--- a/v1/worker/gpu/attn_utils.py
++++ b/v1/worker/gpu/attn_utils.py
+@@ -259,7 +259,24 @@
+         )
+     else:
+         # No padding — safe to use a contiguous view.
+-        kv_cache = kv_raw_tensor.view(dtype).view(permuted_kv_cache_shape)
++        needed = prod(permuted_kv_cache_shape)
++        if (
++            kv_cache_spec.kv_quant_mode.is_per_token_head
++            and kv_raw_tensor.numel() > needed
++            and kv_raw_tensor.numel() % permuted_kv_cache_shape[0] == 0
++            and needed % permuted_kv_cache_shape[0] == 0
++        ):
++            nb = permuted_kv_cache_shape[0]
++            raw_per_blk = kv_raw_tensor.numel() // nb
++            want_per_blk = needed // nb
++            kv_cache = (
++                kv_raw_tensor.view(nb, raw_per_blk)
++                .narrow(1, 0, want_per_blk)
++                .reshape(permuted_kv_cache_shape)
++                .view(dtype)
++            )
++        else:
++            kv_cache = kv_raw_tensor.view(dtype).view(permuted_kv_cache_shape)
+ 
+     return kv_cache.permute(*inv_order)
+ 
+--- a/v1/attention/ops/triton_unified_attention.py
++++ b/v1/attention/ops/triton_unified_attention.py
+@@ -856,9 +856,6 @@
+     # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
+     # sub-byte unpack); everything else goes through the core kernel below.
+     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+-        assert use_causal and not use_per_seq_causal, (
+-            "INT4_PER_TOKEN_HEAD only supports causal attention"
+-        )
+         from vllm.v1.attention.ops.int4_per_token_head import (
+             unified_attention_int4,
+         )
+@@ -891,6 +888,8 @@
+             softmax_segm_output=softmax_segm_output,
+             softmax_segm_max=softmax_segm_max,
+             softmax_segm_expsum=softmax_segm_expsum,
++            use_causal=use_causal,
++            per_seq_causal_ptr=per_seq_causal_ptr,
+         )
+         return
+ 
+--- a/v1/attention/ops/int4_per_token_head.py
++++ b/v1/attention/ops/int4_per_token_head.py
+@@ -385,6 +385,9 @@
+     PACKING_FACTOR: tl.constexpr,
+     FP8_MIN: tl.constexpr = float8_info.min,
+     FP8_MAX: tl.constexpr = float8_info.max,
++    USE_CAUSAL: tl.constexpr = True,
++    USE_PER_SEQ_CAUSAL: tl.constexpr = False,
++    per_seq_causal_ptr=None,
+ ):
+     # Shared prologue: sequence lookup, q-block bounds, early returns.
+     q_block_global_idx = tl.program_id(0)
+@@ -562,6 +565,9 @@
+             SLIDING_WINDOW,
+             USE_MM_PREFIX,
+             MAX_MM_RANGES,
++            USE_CAUSAL,
++            USE_PER_SEQ_CAUSAL,
++            per_seq_causal_ptr,
+         )
+ 
+         # Score: split-dot across the 2 INT4 streams; fused
+@@ -692,6 +698,8 @@
+     softmax_segm_max,
+     softmax_segm_expsum,
+     packing_factor: int,
++    use_causal: bool = True,
++    per_seq_causal_ptr: torch.Tensor | None = None,
+ ):
+     """Launch ``_attn_packed`` for one of the sub-byte modes.
+ 
+@@ -822,6 +830,9 @@
+         USE_FP8=output_scale is not None,
+         IS_3D=use_3d,
+         PACKING_FACTOR=packing_factor,
++        USE_CAUSAL=use_causal,
++        USE_PER_SEQ_CAUSAL=(per_seq_causal_ptr is not None),
++        per_seq_causal_ptr=per_seq_causal_ptr,
+     )
+ 
+     if use_3d:
+@@ -905,6 +916,8 @@
+     softmax_segm_output: torch.Tensor | None = None,
+     softmax_segm_max: torch.Tensor | None = None,
+     softmax_segm_expsum: torch.Tensor | None = None,
++    use_causal: bool = True,
++    per_seq_causal_ptr: torch.Tensor | None = None,
+ ) -> None:
+     """Paged attention over the INT4 packed cache, writing into *out*.
+ 
+@@ -943,6 +956,8 @@
+         softmax_segm_max=softmax_segm_max,
+         softmax_segm_expsum=softmax_segm_expsum,
+         packing_factor=_INT4_PACKING_FACTOR,
++        use_causal=use_causal,
++        per_seq_causal_ptr=per_seq_causal_ptr,
+     )
+ 
+     out_f = single_rht(out.float(), inverse=True) / head_size
+--- a/v1/core/kv_cache_utils.py
++++ b/v1/core/kv_cache_utils.py
+@@ -666,14 +666,17 @@
+         return scheduler_block_size, scheduler_block_size
+ 
+     # Mamba groups with block_size != cache_config.block_size
+-    # (mamba_cache_mode != "align") break divisibility; back off to the
+-    # scheduler block size.
++    # (mamba_cache_mode != "align") break the scheduler==hash equivalence; back
++    # the hash granularity to the GCD of all group block sizes so it still divides
++    # every group (a SlidingWindowSpec whose per-token KV is twice the primary can
++    # end up at half the block size under unify_kv_cache_spec_page_size).
+     if any(
+         isinstance(g.kv_cache_spec, MambaSpec)
+         and g.kv_cache_spec.block_size != cache_config.block_size
+         for g in groups
+     ):
+-        return scheduler_block_size, scheduler_block_size
++        hash_block_size = math.gcd(*group_block_sizes)
++        return scheduler_block_size, hash_block_size
+ 
+     requested = cache_config.prefix_match_unit
+     hash_block_size = (
+@@ -1067,6 +1070,93 @@
+     return len(page_sizes) == 1
+ 
+ 
++def _promote_indivisible_block_sizes(
++    kv_cache_spec: dict[str, KVCacheSpec], max_page_size: int
++) -> tuple[dict[str, KVCacheSpec], int]:
++    """(syv) Raise the block size of layers whose page does not divide the maximum.
++
++    ``unify_kv_cache_spec_page_size`` scales a small page up to the maximum by an
++    integer block-size ratio, and falls back to padding the *page* when the ratio is
++    not an integer. That fallback keeps the layer's block size, so a sliding-window
++    draft layer -- born at the backend's smallest kernel block, 16 -- pays a whole
++    primary page for every 16 tokens. On this repo's DFlash2 drafter that is a 53x
++    blow-up: 385 blocks of 1.71 MiB to hold 33 KB of useful KV, a constant 5.2 GiB.
++
++    It is invisible with a bf16 cache, where the target (4 KV heads x 256) and the
++    drafter (8 x 128) coincidentally both need 4096 B per token per layer, so the
++    ratio is the exact integer 28. A per-token-head quantized cache adds one fp32
++    scale *per head*, which breaks the coincidence (2080 vs 2112 B/token) -- and
++    2112 = 2**6 * 3 * 11 shares no useful factor with the primary page, so no block
++    size ever divides it.
++
++    Instead of padding such a layer's page, round its block size *up* to the smallest
++    multiple of its own kernel granularity whose natural page covers ``max_page_size``.
++    Its page then becomes the new maximum and every other layer pads up by a percent
++    or two -- which is what the padding branch is good at, and cheap, because those
++    layers hold hundreds of blocks each rather than 385 nearly-empty ones.
++
++    Only fires when every other spec can actually accept padding, so it never turns a
++    config that starts today into a NotImplementedError.
++    """
++    candidates = {
++        name: spec
++        for name, spec in kv_cache_spec.items()
++        if isinstance(spec, AttentionSpec)
++        and spec.page_size_bytes < max_page_size
++        and max_page_size % spec.page_size_bytes != 0
++        and spec.block_size > 0
++    }
++    if not candidates:
++        return kv_cache_spec, max_page_size
++
++    new_max = max_page_size
++    promoted: dict[str, KVCacheSpec] = {}
++    for name, spec in candidates.items():
++        per_block = spec.page_size_bytes // spec.block_size  # bytes per token, this layer
++        if per_block <= 0:
++            return kv_cache_spec, max_page_size
++        ratio = cdiv(max_page_size, spec.page_size_bytes)
++        new_block_size = spec.block_size * ratio
++        new_spec = replace(spec, block_size=new_block_size)
++        if new_spec.page_size_bytes < max_page_size:
++            return kv_cache_spec, max_page_size
++        promoted[name] = new_spec
++        new_max = max(new_max, new_spec.page_size_bytes)
++
++    # Everything not promoted must be able to reach new_max: Mamba pads by
++    # construction, attention only if its backend reads pages by block stride.
++    for name, spec in kv_cache_spec.items():
++        if name in promoted or spec.page_size_bytes == new_max:
++            continue
++        if isinstance(spec, MambaSpec):
++            continue
++        if new_max % spec.page_size_bytes == 0:
++            continue
++        if isinstance(spec, AttentionSpec) and spec.indexes_kv_by_block_stride:
++            continue
++        logger.info(
++            "Not promoting draft block sizes: layer %s can neither scale nor pad "
++            "to the resulting page size.",
++            name,
++        )
++        return kv_cache_spec, max_page_size
++
++    updated = dict(kv_cache_spec)
++    for name, spec in promoted.items():
++        logger.info(
++            "Raising block size of %s from %d to %d tokens so its page (%d B) covers "
++            "the maximum (%d B) instead of being padded to it at block %d.",
++            name,
++            kv_cache_spec[name].block_size,
++            spec.block_size,
++            spec.page_size_bytes,
++            max_page_size,
++            kv_cache_spec[name].block_size,
++        )
++        updated[name] = spec
++    return updated, new_max
++
++
+ def unify_kv_cache_spec_page_size(
+     kv_cache_spec: dict[str, KVCacheSpec],
+ ) -> dict[str, KVCacheSpec]:
+@@ -1094,6 +1184,12 @@
+         return kv_cache_spec
+ 
+     max_page_size = max(page_sizes)
++    # (syv) see _promote_indivisible_block_sizes: a draft layer whose page does not
++    # divide the maximum would otherwise keep its 16-token block and pad its page to
++    # the full maximum, costing a whole primary page per 16 tokens.
++    kv_cache_spec, max_page_size = _promote_indivisible_block_sizes(
++        kv_cache_spec, max_page_size
++    )
+     new_kv_cache_spec = {}
+     for layer_name, layer_spec in kv_cache_spec.items():
+         if layer_spec.page_size_bytes == max_page_size:
+@@ -1137,6 +1233,51 @@
+     return not kv_cache_spec
+ 
+ 
++def _prefer_padding_sliding_window_buckets(
++    layer_buckets: list[list[str]],
++    spec_buckets: list[list[KVCacheSpec]],
++    group_size: int,
++) -> int:
++    """(syv) A small sliding-window bucket — e.g. a DFlash drafter's 5 SW layers
++    next to a target's 16 full-attention + 48 mamba layers — would make group_size
++    5 and pad the full-attention layers to 20: 25% more memory for EVERY token of
++    context. Sliding-window groups only ever hold window-sized blocks (the manager
++    frees blocks behind the window), so padding THEM is cheap. When the smallest
++    bucket is sliding-window-only, take the largest common divisor of the other
++    buckets' sizes whose padding of each sliding bucket stays below that bucket's
++    own size (16/48/5 -> 8: no full/mamba padding, 3 padding layers on the 5-layer
++    window group, 9 groups instead of 15)."""
++    from math import gcd
++
++    sw = [
++        i
++        for i, specs in enumerate(spec_buckets)
++        if specs and all(isinstance(sp, SlidingWindowSpec) for sp in specs)
++    ]
++    others = [len(layers) for i, layers in enumerate(layer_buckets) if i not in sw]
++    if not sw or not others:
++        return group_size
++    if min(len(layer_buckets[i]) for i in sw) != group_size:
++        return group_size  # the smallest bucket is not a sliding-window one
++    g_all = 0
++    for n in others:
++        g_all = gcd(g_all, n)
++    for g in range(g_all, group_size, -1):
++        if g_all % g:
++            continue
++        if all(
++            (g - len(layer_buckets[i]) % g) % g <= len(layer_buckets[i]) for i in sw
++        ):
++            logger.info(
++                "Sliding-window bucket(s) are the smallest; using group_size %d "
++                "(pads the sliding-window group instead of the full-attention/"
++                "mamba layers)",
++                g,
++            )
++            return g
++    return group_size
++
++
+ def _get_kv_cache_groups_uniform_page_size(
+     kv_cache_spec: dict[str, KVCacheSpec],
+ ) -> list[KVCacheGroupSpec]:
+@@ -1254,6 +1395,10 @@
+         # layers while accommodating speculative decoding drafters that add
+         # extra layers to one attention type.
+         group_size = max_num_layers
++    else:
++        group_size = _prefer_padding_sliding_window_buckets(
++            layer_buckets, spec_buckets, group_size
++        )
+     grouped_layers = []
+     for layers in layer_buckets:
+         num_padding_layers = group_size - len(layers) % group_size
