@@ -707,6 +707,10 @@ venv/bin/python prepare/fetch_thirdparty.py
 venv/bin/python prepare/quant_heads_stream.py models/Qwen3.8-27B-Uncensored-W4A16
 
 # patch vllm (all written against 0.27.1; reapply after upgrades)
+# The number prefix is the apply order: some patches build on hunks an earlier
+# patch adds, so the glob only works because the names sort in that order. A
+# new patch takes the next free number; one that must apply earlier renumbers
+# everything after it.
 for p in patches/*.patch; do
   patch -p1 -d venv/lib/python3.12/site-packages/vllm < $p
 done

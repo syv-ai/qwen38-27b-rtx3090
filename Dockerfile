@@ -24,6 +24,9 @@ COPY docker/requirements.txt docker/requirements.txt
 RUN venv/bin/pip install -r docker/requirements.txt
 
 COPY . .
+# The number prefix on each patch is the apply order: some patches build on
+# hunks an earlier patch adds, so the glob below only works because the names
+# sort in that order. A new patch takes the next free number.
 RUN set -e; SP=$(venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))' | tail -n1); \
     for p in patches/*.patch; do echo "== $p"; patch -p1 -d "$SP" < "$p"; done; \
     bash kvarn/install.sh; \
