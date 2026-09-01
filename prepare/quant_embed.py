@@ -5,7 +5,7 @@ Qwen3.8-27B has untied embeddings, so embed_tokens is a second 2.5 GB bf16
 matrix on top of lm_head. vLLM ships a dequant-on-gather path for int-quantized
 embeddings (CompressedTensorsEmbeddingWNA16Int) but the qwen3_5 model code
 never passes quant_config to VocabParallelEmbedding, so you also need the
-two-line patch in patches/qwen3_5-embed-quant.patch.
+two-line patch in patches/0001-qwen3_5-embed-quant.patch.
 
 Usage: python prepare/quant_embed.py /path/to/Qwen3.8-27B-W4A16-AutoRound
 

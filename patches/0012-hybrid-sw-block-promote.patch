@@ -38,8 +38,8 @@ Measured on the 3090, SPEC=dflash2 DFLASH_TOKENS=7, --kv-cache-memory=5583457484
 138,696 against bf16's 69,758 is 1.99x the context in the same pool. bf16 is untouched
 because its pages already divide.
 
-Apply from the repo root, after hybrid-kv-groups-v2-cudagraph.patch:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/hybrid-sw-block-promote.patch
+Apply from the repo root, after 0010-hybrid-kv-groups-v2-cudagraph.patch:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0012-hybrid-sw-block-promote.patch
 
 Written against vLLM 0.27.1. Reapply after upgrades.
 

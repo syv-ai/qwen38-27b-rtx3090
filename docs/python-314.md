@@ -40,9 +40,10 @@ sudo apt-get install -y python3.14-dev     # or python3.13-dev, etc.
 ## Three things that cost us time and are not version-specific
 
 1. **The patches are SEQUENTIALLY DEPENDENT.** Applied individually, three of fifteen fail
-   (`dflash2-lookup-drafting`, `spec-decode-int8-kv`, `vision-tower-cpu-offload`) because
-   they build on hunks an earlier patch introduces. Applied in the README's loop order, all
-   fifteen land. A dry-run over the set will look like an incompatibility but is not one.
+   (`0011-dflash2-lookup-drafting`, `0013-spec-decode-int8-kv`,
+   `0015-vision-tower-cpu-offload`) because they build on hunks an earlier patch
+   introduces. Applied in the README's loop order, all fifteen land. A dry-run over
+   the set will look like an incompatibility but is not one.
 
 2. **`patch -d` targets the `vllm` PACKAGE directory, not `site-packages`.** The README is
    correct; it is an easy misread. Pointing one level too high fails all fifteen, which

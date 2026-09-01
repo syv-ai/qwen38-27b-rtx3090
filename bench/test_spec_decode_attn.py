@@ -1,5 +1,5 @@
 """Correctness + microbenchmark of the split-KV spec-decode attention kernel
-(patches/spec-decode-attn.patch) against vLLM's FlashAttention-2 call, including the
+(patches/0007-spec-decode-attn.patch) against vLLM's FlashAttention-2 call, including the
 long query blocks lookup-augmented drafting asks for (16 and 32 tokens per request).
 Run inside the vLLM venv on the GPU after applying the patch:
   venv/bin/python bench/test_spec_decode_attn.py"""

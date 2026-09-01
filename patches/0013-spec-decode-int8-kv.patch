@@ -1,6 +1,6 @@
 Let the split-KV verify attention read an int8 per-token-head KV cache, and hook it into the
 Triton backend. This is what makes a quantized KV cache -- and therefore >64k context -- worth
-anything for SPEC=dflash2; hybrid-sw-block-promote.patch is what makes it fit.
+anything for SPEC=dflash2; 0012-hybrid-sw-block-promote.patch is what makes it fit.
 
 Two halves:
 
@@ -34,8 +34,8 @@ bf16 despite half the bytes -- this kernel is tile-bound, not bandwidth-bound, a
 shapes, so a quantized cache buys context, never speed. Reading the data as int32 (4-byte
 aligned, which 260 does satisfy) and unpacking would recover most of the 61%; not done here.
 
-Apply from the repo root, after spec-decode-attn.patch:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/spec-decode-int8-kv.patch
+Apply from the repo root, after 0007-spec-decode-attn.patch:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0013-spec-decode-int8-kv.patch
 
 Written against vLLM 0.27.1. Reapply after upgrades.
 

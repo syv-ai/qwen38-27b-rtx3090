@@ -70,7 +70,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 
    What `VISION_OFFLOAD=1` does: the tower's weights live in pinned host RAM and each
    module is copied to the GPU for the duration of its own forward
-   (`patches/vision-tower-cpu-offload.patch`). Isolated-tower measurement, RTX 3090 at
+   (`patches/0015-vision-tower-cpu-offload.patch`). Isolated-tower measurement, RTX 3090 at
    PCIe 4.0 x16, one 8192-patch image, median of 10 forwards: resident weights 891.3 ->
    9.0 MiB, peak allocation 1160.5 -> 308.2 MiB, encode 296 -> 333 ms, output bit-exact
    against the resident tower. Note which offload path that is: vLLM's UVA *zero-copy*
@@ -111,7 +111,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     varlen path then runs one thread block per (request, head): 24 blocks on 82
     SMs, 57 µs per layer at 1.5k context and 1.3 ms at 16k. vLLM's Triton
     unified attention has the same restriction (`max_seqlen_q > 1` → 2-D
-    kernel). `patches/spec-decode-attn.patch` (`VLLM_SPEC_DECODE_ATTN=1`, bf16
+    kernel). `patches/0007-spec-decode-attn.patch` (`VLLM_SPEC_DECODE_ATTN=1`, bf16
     KV only) is a 180-line Triton fix. Watch its query cap: the kernel used to
     handle at most `BLOCK_M / (heads per kv head)` = 10 query tokens and fall
     back silently past that, which doubled the step at 25k context the moment
@@ -124,7 +124,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 15. **A stale torch.compile cache bites anything that changes tensor shapes
     behind vLLM's back.** The compiled graph bakes in e.g. the Marlin workspace
     size; a new env knob that changes it must be registered in `envs.py`
-    (`patches/speed-knobs-envs.patch`) or you get `assert_size_stride ...
+    (`patches/0008-speed-knobs-envs.patch`) or you get `assert_size_stride ...
     expected size 328==82` from a cached artifact.
 16. **The very first start gets a smaller KV pool.** vLLM sizes the pool from
     the peak memory of a profiling forward pass, and on a cold torch.compile
@@ -147,7 +147,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     you asked for), the hybrid allocator sizes KV groups by the smallest layer
     bucket, and the profiled activation peak varies by ~1 GiB between starts of
     the *same* config — three ways to get a server that either wastes a quarter
-    of its pool or dies mid-request. `patches/hybrid-kv-groups-v2-cudagraph.patch`
+    of its pool or dies mid-request. `patches/0010-hybrid-kv-groups-v2-cudagraph.patch`
     fixes the first two; for the third, pin the pool in bytes
     (`--kv-cache-memory`, what `KV_MEM` does) instead of tuning utilization. That
     runner also answers `thinking_token_budget` with 400, and the first request
@@ -211,7 +211,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     16 rows (`m_block_size = 16 * thread_m_blocks`, `thread_m_blocks = div_ceil(prob_m,
     16)`), so a 17th query token buys a second M block in all 64 layers and the tokens up to
     32 are then free. The second is the verify attention: `SpecDecodeAttention._plan`
-    (patches/spec-decode-attn.patch) puts `q_len * G` rows in a 128-row tile, so with this
+    (patches/0007-spec-decode-attn.patch) puts `q_len * G` rows in a 128-row tile, so with this
     model's `G = 24/4 = 6` one tile holds `128 // 6 = 21` query tokens and a 22nd re-reads
     the request's whole KV segment (250/583/1132 us per layer at 8/16/32).
     So there are exactly two sensible block lengths — 16 query tokens, the last one on the
@@ -265,7 +265,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `cdiv(2047 + 4096, 16) + 1 = 385` blocks of 1.71 MiB at 1.88% utilisation — a constant
     5.155 GiB, 75.6% of the per-request budget. Measured: int8 needed **6.82 GiB to serve
     32,768 tokens** where bf16 serves 69,758 in 5.2 GiB, i.e. 2.4× worse from halving the
-    dtype. `patches/hybrid-sw-block-promote.patch` rounds such a layer's block *up* instead
+    dtype. `patches/0012-hybrid-sw-block-promote.patch` rounds such a layer's block *up* instead
     (16 → 864), which turns that into 138,696 tokens. The tell in a log is an "estimated
     maximum model length" that is a small multiple of 16.
 33. **The aligned recurrent-state pages scale with the verify block, not with the slot count.**
@@ -530,7 +530,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 
 40. **Tool calling / structured output under a speculator killed requests at the
     grammar's end** ([#31](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/31),
-    fixed by `patches/xgrammar-spec-terminated.patch`). A speculative verify window
+    fixed by `patches/0014-xgrammar-spec-terminated.patch`). A speculative verify window
     can legally accept tokens past the point where the xgrammar matcher terminates —
     the newline after a closing `</tool_call>` tag, the stop token itself, anything
     after it under `ignore_eos`. 0.27.1 treats both arrivals as failure, the
@@ -584,7 +584,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     large per-token size (gotcha 25's 4096-B coincidence), the geometry
     stays uniform, and the same connector uplifts at PCIe speed — the KV
     dtype was never the mechanism, the chunk geometry it induces was. Since
-    `offload-dflash-eagle-groups.patch` the config builder warns at boot
+    `0018-offload-dflash-eagle-groups.patch` the config builder warns at boot
     with the waste factor and the `cpu_bytes_to_use` multiplier that would
     compensate (~17x under KVarN). Same patch fixes an adjacent quiet bug:
     upstream only ever sets `is_eagle_group` for DeepSeek V4, so the

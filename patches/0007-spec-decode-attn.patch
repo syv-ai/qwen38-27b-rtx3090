@@ -27,7 +27,7 @@ afterwards: a captured CUDA graph holds their addresses, and a later reallocatio
 block - leaves the captured decode graph reading freed memory.
 
 Apply from the repo root:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/spec-decode-attn.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0007-spec-decode-attn.patch
 
 --- a/v1/attention/backends/flash_attn.py
 +++ b/v1/attention/backends/flash_attn.py

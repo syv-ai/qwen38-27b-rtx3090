@@ -1,6 +1,6 @@
 """How the multi-query verify attention scales with context, and what it would cost at 128k.
 
-The split-KV kernel in patches/spec-decode-attn.patch was tuned at a 25k context with
+The split-KV kernel in patches/0007-spec-decode-attn.patch was tuned at a 25k context with
 NUM_SEGMENTS hardcoded to 16. Long-context DFlash2 needs to know three things before any
 KV-format work is worth starting:
 

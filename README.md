@@ -113,7 +113,7 @@ its attention KV and its recurrent state. One request at a time, greedy, RTX
 context, whole verify blocks come from history alone and the drafter's forward
 and graph replay are skipped until the first rejected token — +7% on the copy
 cell here (256.9 → 276 tok/s at `DFLASH_TOKENS=7`), flat on prose, greedy
-requests only by default (`patches/dflash2-ngram-chains.patch` explains why
+requests only by default (`patches/0019-dflash2-ngram-chains.patch` explains why
 sampling keeps the drafter). Off by default.
 
 <sub>\* drafting from the context only exists in `SPEC=dflash2`. The two right
@@ -448,7 +448,7 @@ Where KVarN reaches 268k with its own kernels, vLLM's stock
 padded-page view error under the hybrid block-promotion geometry, and a
 causal-only assert plus missing per-seq-causal plumbing in the int4 Triton
 kernel, which the drafter's 8-row draft block needs
-(`patches/int4-kv-per-token-head.patch`, contributed in
+(`patches/0016-int4-kv-per-token-head.patch`, contributed in
 [#42](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/42) by @lachhabw).
 
 The trade: the Triton attention backend plus the per-step int4 unpack cost

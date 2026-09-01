@@ -124,7 +124,7 @@ TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-
 if [ "${VISION:-0}" = 1 ]; then
   VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
   # VISION_OFFLOAD keeps the tower's weights in pinned host RAM and copies each module to
-  # the GPU for the duration of its own forward (patches/vision-tower-cpu-offload.patch).
+  # the GPU for the duration of its own forward (patches/0015-vision-tower-cpu-offload.patch).
   # It defaults ON, because on 24 GB SPEC=dflash2 + VISION=1 does not boot without it:
   # the tower is 0.85 GiB of the ~1.1 GiB transient margin the KV_MEM comment sizes, and
   # graph capture then dies allocating the split-KV verify buffer --

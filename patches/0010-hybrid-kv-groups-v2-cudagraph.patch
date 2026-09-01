@@ -28,7 +28,7 @@ inert for every other config in this repo (verified: MTP mode's pool is bit-iden
    single-user/start_qwen.sh does for SPEC=dflash2) over tuning gpu_memory_utilization.
 
 Apply from the installed vllm package directory:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/hybrid-kv-groups-v2-cudagraph.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0010-hybrid-kv-groups-v2-cudagraph.patch
 
 Written against vLLM 0.27.1. Reapply after upgrades.
 

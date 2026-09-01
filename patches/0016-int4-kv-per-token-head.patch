@@ -12,7 +12,7 @@ launcher for this profile.
 The three mechanisms, in boot order:
 
 1. v1/worker/gpu/attn_utils.py — the padded-page view. With
-   hybrid-sw-block-promote.patch in place, the drafter's sliding-window layer
+   0012-hybrid-sw-block-promote.patch in place, the drafter's sliding-window layer
    is promoted and every other layer's page is *padded* up to the promoted
    maximum, so the raw KV tensor holds more bytes per block than the logical
    shape needs. The flat `.view(dtype).view(shape)` cannot express that:
@@ -40,7 +40,7 @@ The three mechanisms, in boot order:
 
 Verified here (RTX 3090, 250 W): unpatched boot reproduces the RuntimeError
 above; patched boot serves — coherent prose, tool-calling round trip with
-well-formed arguments (composes with xgrammar-spec-terminated.patch), lookup
+well-formed arguments (composes with 0014-xgrammar-spec-terminated.patch), lookup
 lane active on verbatim reproduction. Shipped-config inertness: production
 FLASH_ATTN + bf16 boot pool is byte-identical (57,669 tokens) and none of the
 modified branches are reachable under it. Quality at depth (needle, GSM8K)
@@ -49,7 +49,7 @@ has not been measured on int4 KV — treat the profile as experimental.
 Provenance: PR #42 by Walid Lachhab (@lachhabw), rebased onto this patch
 stack. Their submission was cut against stock 0.27.1 and therefore re-shipped
 the kv_cache_utils.py block-promotion/grouping functions this repo already
-carries in hybrid-sw-block-promote.patch (dropped here), plus a mamba
+carries in 0012-hybrid-sw-block-promote.patch (dropped here), plus a mamba
 GCD-hash change whose branch is unreachable under the launchers'
 `--mamba-cache-mode align` (dropped; details in the PR thread).
 

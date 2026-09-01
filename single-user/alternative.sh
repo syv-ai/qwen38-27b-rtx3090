@@ -6,7 +6,7 @@
 # config, 268k for CTX=huge/KVarN) on stock vLLM machinery — no kvarn
 # install. Costs ~20% decode vs the FLASH_ATTN bf16 path and the int4
 # cache's quality at depth is unmeasured here; see the README section.
-# Needs patches/int4-kv-per-token-head.patch (applied by setup like the
+# Needs patches/0016-int4-kv-per-token-head.patch (applied by setup like the
 # rest of patches/). Profile contributed in PR #42 (@lachhabw).
 set -e
 

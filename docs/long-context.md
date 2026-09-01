@@ -125,7 +125,7 @@ on the Triton backend and roughly doubles the context:
 
 Two patches make that work, and neither changes anything at bf16:
 
-- **[hybrid-sw-block-promote.patch](../patches/hybrid-sw-block-promote.patch)** — without it,
+- **[0012-hybrid-sw-block-promote.patch](../patches/0012-hybrid-sw-block-promote.patch)** — without it,
   int8 costs *more* memory than bf16, not less: 6.82 GiB to serve 32,768 tokens. vLLM equalizes
   KV page sizes by scaling a layer's block size up by an integer ratio, and the drafter's five
   sliding-window layers are born at the smallest kernel block, 16. That ratio is an integer at
@@ -134,7 +134,7 @@ Two patches make that work, and neither changes anything at bf16:
   per head. The drafter's layers then keep a 16-token block while their page is padded to the
   full 1.71 MiB primary page: 385 blocks at 1.88% utilisation, a constant 5.2 GiB. The patch
   rounds those layers' block up (16 → 864) so their page covers the maximum instead.
-- **[spec-decode-attn-int8.patch](../patches/spec-decode-int8-kv.patch)** — the split-KV verify
+- **[0013-spec-decode-int8-kv.patch](../patches/0013-spec-decode-int8-kv.patch)** — the split-KV verify
   kernel reads the quantized cache and is wired into the Triton backend, which otherwise cannot
   split KV for a multi-query verify at all (`use_3d` is off whenever `max_seqlen_q > 1`, and
   every DFlash2 step is a verify). Per attention layer at 128k, 8 query tokens: 1.3 ms for this

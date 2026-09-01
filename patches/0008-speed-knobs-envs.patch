@@ -1,13 +1,13 @@
 Register the single-user speed knobs as vLLM env vars (vLLM 0.27.1).
 
 VLLM_MARLIN_TUNE / VLLM_MARLIN_TUNE_DIR (tuned Marlin build, see marlin-tune/),
-VLLM_SPEC_DECODE_ATTN (patches/spec-decode-attn.patch) and VLLM_DRAFT_TOPK_TOPP
-(patches/sampler-small-topk-fast-softmax.patch). Every registered vLLM env var is
+VLLM_SPEC_DECODE_ATTN (patches/0007-spec-decode-attn.patch) and VLLM_DRAFT_TOPK_TOPP
+(patches/0006-sampler-small-topk-fast-softmax.patch). Every registered vLLM env var is
 part of the torch.compile cache key; VLLM_MARLIN_TUNE in particular changes the
 Marlin workspace tensor shape that is baked into the compiled graph, so without
 this a cached graph from a run without the flag fails with
-"assert_size_stride ... expected size 328==82". Independent of marlin-int8-layer-select.patch (same file, disjoint hunks):
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/speed-knobs-envs.patch
+"assert_size_stride ... expected size 328==82". Independent of 0002-marlin-int8-layer-select.patch (same file, disjoint hunks):
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0008-speed-knobs-envs.patch
 
 --- a/envs.py	2026-08-18 17:39:49.533320659 +0200
 +++ b/envs.py	2026-08-18 17:39:49.545078727 +0200

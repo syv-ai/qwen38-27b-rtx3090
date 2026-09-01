@@ -14,7 +14,7 @@
 #  - the MTP module and lm_head requantized to int4 with GPTQ calibrated on the
 #    model's hidden states (drafter/): 850 -> 215 MB per draft, 1.27 -> 0.65 GB
 #    lm_head per verify, +0.6% perplexity, acceptance unchanged
-#  - patches/spec-decode-attn.patch: split-KV attention for the 5-query verify
+#  - patches/0007-spec-decode-attn.patch: split-KV attention for the 5-query verify
 #    step (FA2 leaves 58 of 82 SMs idle there); patches/sampler-...: sort-free
 #    top-k, multi-block softmax, drafts truncated to the target's top-k/top-p
 #  - draft_sample_method=probabilistic: drafts are sampled, not argmax'ed, which
@@ -106,7 +106,7 @@ INT8_LAYERS=${INT8_LAYERS-mlp|linear_attn|self_attn}
 [ -n "$INT8_ACT" ] && export VLLM_MARLIN_INPUT_DTYPE=$INT8_ACT
 [ -n "$INT8_ACT" ] && [ -n "$INT8_LAYERS" ] && export VLLM_MARLIN_INT8_INCLUDE_RE=$INT8_LAYERS
 # PREFILL_ATTN=int8: int8-QK Triton attention for the hd256 full-attention
-# layers during prefill (patches/prefill-attn-int8.patch): 1.27-1.35x FA2 on
+# layers during prefill (patches/0024-prefill-attn-int8.patch): 1.27-1.35x FA2 on
 # the attention itself, worth up to ~+5% end-to-end at 51k on top of INT8_ACT
 # (1,839/1,498 tok/s at 16k/51k with both on). Prefill-only; decode and the
 # split-KV verify keep their existing paths. fp16 selects the same kernel
@@ -130,7 +130,7 @@ CTX=${CTX:-fast}
 # SPEC=dflash2: the DFlash2 block drafter (incoai/Qwen3.8-27B-DFlash2, requantized
 #   to W4A16 by this repo: prepare/fetch_dflash2.py), 7 drafts in ONE non-autoregressive
 #   pass + a path selector; runs on vLLM's V2 model runner
-#   (patches/dflash2-backport.patch). CTX=fast (bf16, 64k), CTX=long (int8,
+#   (patches/0009-dflash2-backport.patch). CTX=fast (bf16, 64k), CTX=long (int8,
 #   128k) or, with kvarn/install.sh, CTX=huge (KVarN 4/2-bit, 240k + prefix
 #   caching); see README "DFlash2".
 # SPEC=off (or none): no speculative decoding at all. This used to fall through
@@ -139,7 +139,7 @@ CTX=${CTX:-fast}
 #   alternative.sh. Any other value now refuses instead of proceeding.
 SPEC=${SPEC:-mtp}
 # SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
-# (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
+# (patches/0007-spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
 if [ "$CTX" = "fast" ]; then
   MAX_LEN=${MAX_LEN:-65536}
   DRAFT_TOKENS=${DRAFT_TOKENS:-4}
@@ -157,9 +157,9 @@ else
 fi
 if [ "$SPEC" = "dflash2" ] && [ "$CTX" = "long" ]; then
   # int8 per-token-head KV on the Triton backend: the same 5.2 GiB pool holds 136,429
-  # tokens instead of 69,758, because patches/hybrid-sw-block-promote.patch stops the
+  # tokens instead of 69,758, because patches/0012-hybrid-sw-block-promote.patch stops the
   # drafter's 5 sliding-window layers from taking 385 nearly-empty blocks, and
-  # patches/spec-decode-attn-int8.patch lets the split-KV verify kernel read the quantized
+  # patches/0013-spec-decode-int8-kv.patch lets the split-KV verify kernel read the quantized
   # cache (vLLM's own Triton attention will not split KV for a multi-query verify, which
   # is every step here, and costs 7.4 ms per layer at 128k against this kernel's 1.3).
   # Costs prefill: 251 s to load a 112k document against FLASH_ATTN's ~112 s. With
@@ -186,7 +186,7 @@ if [ "$SPEC" = "dflash2" ]; then
   [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: venv/bin/python prepare/fetch_dflash2.py" >&2; exit 1; }
   # Lookup-augmented drafting: when the model is reproducing something from its context,
   # draft from the context instead of from the drafter
-  # (patches/dflash2-lookup-drafting.patch).
+  # (patches/0011-dflash2-lookup-drafting.patch).
   export VLLM_DFLASH2_LOOKUP=${LOOKUP:-1}
   # DFLASH_TOKENS is the *verify* block, which no longer has to equal the drafter's: the
   # DFlash2 checkpoint always proposes the 7 tokens it was trained for, and any position
@@ -201,7 +201,7 @@ if [ "$SPEC" = "dflash2" ]; then
   # applying edits or a RAG front-end quoting sources; the default stays 7.
   DRAFT_TOKENS=${DFLASH_TOKENS:-7}
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS}"
-  # The split-KV verify attention (patches/spec-decode-attn.patch) sizes its partial
+  # The split-KV verify attention (patches/0007-spec-decode-attn.patch) sizes its partial
   # buffers once for the longest query block it will see -- a captured CUDA graph holds
   # their addresses, so they must not be grown later.
   export VLLM_SPEC_DECODE_ATTN_QMAX=${VLLM_SPEC_DECODE_ATTN_QMAX:-$((DRAFT_TOKENS + 1))}
@@ -275,7 +275,7 @@ if [ "$SPEC" = "dflash2" ]; then
            "for TP>1." >&2
     fi
   fi
-  # Memory: patches/hybrid-kv-groups-v2-cudagraph.patch stops the drafter's 5
+  # Memory: patches/0010-hybrid-kv-groups-v2-cudagraph.patch stops the drafter's 5
   # sliding-window layers from padding the target's attention/GDN layers (78 instead of
   # 105 KB of pool per token), which is what makes 64k reachable here. The V2 runner's
   # profiled activation peak swings ~1 GiB between starts, so the pool is pinned by bytes
@@ -555,7 +555,7 @@ TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-
 if [ "${VISION:-0}" = 1 ]; then
   VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
   # VISION_OFFLOAD keeps the tower's weights in pinned host RAM and copies each module to
-  # the GPU for the duration of its own forward (patches/vision-tower-cpu-offload.patch).
+  # the GPU for the duration of its own forward (patches/0015-vision-tower-cpu-offload.patch).
   # It defaults ON, because on 24 GB SPEC=dflash2 + VISION=1 does not boot without it:
   # the tower is 0.85 GiB of the ~1.1 GiB transient margin the KV_MEM comment sizes, and
   # graph capture then dies allocating the split-KV verify buffer --
@@ -575,7 +575,7 @@ fi
 
 # fp16 activations do not work with the speculative path, and the way you find that out
 # is late and cryptic (#27): the split-KV verify kernel hardcodes tl.bfloat16 for the
-# query cast and the dot accumulate (patches/spec-decode-attn.patch:217,236), so it
+# query cast and the dot accumulate (patches/0007-spec-decode-attn.patch:217,236), so it
 # fails to *compile* at first attention with "Both operands must be same dtype. Got bf16
 # and fp16" -- a triton CompilationError that never names the dtype you set.
 #
@@ -595,7 +595,7 @@ case " ${EXTRA_ARGS:-} " in
   *" --dtype float16 "*|*" --dtype=float16 "*|*" --dtype fp16 "*|*" --dtype=fp16 "*|*" --dtype half "*|*" --dtype=half "*)
     if [ "$SPEC" != "none" ] && [ "$SPEC" != "off" ]; then
       echo "--dtype float16 needs SPEC=off: this repo's speculative path is bf16-only." >&2
-      echo "  the split-KV verify attention casts to tl.bfloat16 (patches/spec-decode-attn.patch)," >&2
+      echo "  the split-KV verify attention casts to tl.bfloat16 (patches/0007-spec-decode-attn.patch)," >&2
       echo "  so it fails to compile at the first attention. See issue #27." >&2
       exit 1
     fi ;;
