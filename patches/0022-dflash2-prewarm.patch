@@ -19,7 +19,7 @@ Verified on the reference 3090: fresh boot, SPEC=dflash2 CTX=huge, one ~30k
 first request -- _prepare_dflash_inputs_kernel no longer appears in
 jit_monitor at all (it did on every boot before).
 
-Apply with the patches/ set (alphabetical: after the dflash2 trio).
+Apply with the patches/ set (by number prefix: after the dflash2 trio).
 
 --- a/v1/worker/gpu/spec_decode/dflash/speculator.py
 +++ b/v1/worker/gpu/spec_decode/dflash/speculator.py

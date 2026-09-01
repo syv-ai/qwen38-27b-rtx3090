@@ -53,11 +53,11 @@ output distribution is unchanged. The rewrite keeps the sparse draft-logit cache
 (every finite entry of a row is listed in `_cached_candidate_ids`, so the next step erases
 it) and reads the token back from `draft_tokens`, so q always describes what is verified.
 
-Requires patches/dflash2-backport.patch, and patches/spec-decode-attn.patch for a verify
+Requires patches/0009-dflash2-backport.patch, and patches/0007-spec-decode-attn.patch for a verify
 block longer than 10 query tokens (FlashAttention-2 does not split the KV sequence for
 multi-query decode; falling back to it doubles the step at 25k context).
 Apply from the installed vllm package directory:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/dflash2-lookup-drafting.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0011-dflash2-lookup-drafting.patch
 
 Written against vLLM 0.27.1.
 --- a/model_executor/models/qwen3_dflash2.py

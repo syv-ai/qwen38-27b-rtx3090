@@ -10,7 +10,7 @@ off) because we hit illegal-memory-access crashes with several concurrent MTP
 requests. Note: it does NOT fix the k=4 crash described in single-user/README.md.
 
 Apply from the installed vllm package directory:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/vllm-pr50021-gdn-spec-bounds.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0005-vllm-pr50021-gdn-spec-bounds.patch
 
 Source: https://github.com/vllm-project/vllm/pull/50021 (Apache-2.0).
 

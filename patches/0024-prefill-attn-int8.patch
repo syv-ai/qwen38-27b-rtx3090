@@ -33,8 +33,8 @@ keeps FA2). The branch fires only for single-request prefill chunks
 geometry, with bf16 KV, causal, and no window/softcap/alibi/sinks — anything
 else falls through to FA2. Decode and the split-KV verify path are untouched.
 
-Apply from the installed vllm package directory, after spec-decode-attn.patch:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/prefill-attn-int8.patch
+Apply from the installed vllm package directory, after 0007-spec-decode-attn.patch:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0024-prefill-attn-int8.patch
 
 Written against vLLM 0.27.1.
 

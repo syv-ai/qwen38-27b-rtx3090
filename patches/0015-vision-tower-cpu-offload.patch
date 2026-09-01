@@ -38,9 +38,9 @@ Bit-exact against the resident tower (same state_dict, torch.equal on the output
 Do NOT leave the UVA zero-copy path on for this: same memory, but 3327 ms per
 image, because the GEMMs then re-read operand tiles over PCIe in the inner loop.
 
-Applies after speed-knobs-envs.patch and marlin-int8-layer-select.patch, which
+Applies after 0008-speed-knobs-envs.patch and 0002-marlin-int8-layer-select.patch, which
 also touch envs.py (disjoint hunks, and glob order puts this one last):
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/vision-tower-cpu-offload.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0015-vision-tower-cpu-offload.patch
 
 --- a/envs.py
 +++ b/envs.py

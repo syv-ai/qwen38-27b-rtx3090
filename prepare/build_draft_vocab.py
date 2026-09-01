@@ -12,7 +12,7 @@ code + the model's own outputs), picks the top N ids (plus special tokens),
 slices those rows out of the already-int8-quantized lm_head, and stores them
 as `mtp.draft_lm_head.*` in model_extra_tensors.safetensors, plus the id map in
 `mtp_draft_vocab_ids.pt`. Needs the matching vLLM patch
-(patches/qwen3_5-mtp-draft-vocab.patch) to be used.
+(patches/0004-qwen3_5-mtp-draft-vocab.patch) to be used.
 
 Usage (from the repo root):
   python prepare/build_draft_vocab.py /path/to/model --ids prepare/draft_vocab_ids.json  # shipped id list

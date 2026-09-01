@@ -44,7 +44,7 @@ termination) still log and still return False, so real integration bugs stay
 loud.
 
 Applies to the vLLM tree:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/xgrammar-spec-terminated.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0014-xgrammar-spec-terminated.patch
 
 --- a/v1/structured_output/backend_xgrammar.py
 +++ b/v1/structured_output/backend_xgrammar.py

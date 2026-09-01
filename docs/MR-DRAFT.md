@@ -14,7 +14,7 @@ and [docs/reproductions/native-3090.md](docs/reproductions/native-3090.md).
 
 What it carries:
 
-1. **A fix for the CPU offload tier on WSL2** (`patches/offload-wsl2-devptr.patch`).
+1. **A fix for the CPU offload tier on WSL2** (`patches/0020-offload-wsl2-devptr.patch`).
    The OffloadingConnector crashes with an illegal memory access on WSL2. We
    root caused it, fixed it, and validated the fix on both platforms. This is
    probably an upstream vLLM bug rather than a repo bug: any WSL2 user of the
@@ -22,7 +22,7 @@ What it carries:
 2. **A one flag fix for prefix caching going dead** on int4 KV + DFlash2
    (`--prefix-match-unit 848`), with the analysis of why it dies.
 3. **An int4 attention kernel for speculative decoding**
-   (`patches/spec-decode-int4-kv-mq3d.patch`), opt in via `VLLM_INT4_MQ_3D=1`.
+   (`patches/0021-spec-decode-int4-kv-mq3d.patch`), opt in via `VLLM_INT4_MQ_3D=1`.
    About 3.3x end to end on deep int4 spec decode. It defaults off, and section
    3 lists the tests it still owes before it earns default on.
 4. **A measurement correction** that matters to anyone benchmarking this stack

@@ -8,7 +8,7 @@ uses the target model), only the acceptance rate can change. Set
 MTP_DRAFT_VOCAB=0 to fall back to the shared full lm_head.
 
 Apply from the installed vllm package directory:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/qwen3_5-mtp-draft-vocab.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0004-qwen3_5-mtp-draft-vocab.patch
 
 Written against vLLM 0.27.1.
 

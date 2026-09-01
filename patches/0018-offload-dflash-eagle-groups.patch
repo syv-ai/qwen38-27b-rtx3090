@@ -23,7 +23,7 @@ report (issue #33) on this card, with the connector instrumented:
    complete_store succeeds, and by the time the same document returns, its
    blocks are gone: every lookup MISS, 0 bytes ever loaded, exactly the
    report. On bf16 the SW group shares the large block size (the same
-   4096-B/token coincidence hybrid-sw-block-promote.patch documents), so
+   4096-B/token coincidence 0012-hybrid-sw-block-promote.patch documents), so
    the geometry never explodes and offloading uplifts -- which is why the
    reporter saw the split along KV dtype.
 

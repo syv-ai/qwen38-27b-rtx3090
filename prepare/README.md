@@ -22,7 +22,7 @@ $V prepare/fetch_dflash2.py         # optional, 1.2 GB: the DFlash2 drafter (SPE
 `build_draft_vocab.py` writes a 40,960-row slice of `lm_head` for the MTP drafter to
 score instead of the full 248k vocabulary; `draft_vocab_ids.json` is the shipped id
 list, and `--corpus` counts your own instead. It needs
-[patches/qwen3_5-mtp-draft-vocab.patch](../patches/qwen3_5-mtp-draft-vocab.patch).
+[patches/0004-qwen3_5-mtp-draft-vocab.patch](../patches/0004-qwen3_5-mtp-draft-vocab.patch).
 
 ## A different checkpoint
 

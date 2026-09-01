@@ -11,7 +11,7 @@ One line each; the rest of this page is the long version.
 1. **Both embedding matrices requantized** (`prepare/quant_lm_head.py`, `prepare/quant_embed.py`)
    — the public W4A16 quants leave two 2.5 GB bf16 matrices alone. 2.6 GB back.
 2. **A two-line vLLM patch** so the model code actually uses vLLM's quantized
-   embedding kernel (`patches/qwen3_5-embed-quant.patch`).
+   embedding kernel (`patches/0001-qwen3_5-embed-quant.patch`).
 3. **16-bit recurrent state** — the GDN state, not the KV cache, is what bounds
    concurrency here: 37 of 64 requests were running before this.
 4. **int8 tensor cores for the batched GEMMs, with a bug fix** — vLLM's W4A8
@@ -27,7 +27,7 @@ One line each; the rest of this page is the long version.
    an illegal memory access in the DeltaNet spec-decode kernels.
 8. **Speculation that reads the context** — when the model is reproducing
    something from its prompt, draft it from the prompt, and verify a longer
-   block than the drafter can fill (`patches/dflash2-lookup-drafting.patch`):
+   block than the drafter can fill (`patches/0011-dflash2-lookup-drafting.patch`):
    **381 tok/s** reproducing a 25k-token document verbatim, against 260 for the
    first version of this and 159 without it, still lossless.
 9. **Prefix caching for a hybrid model** — opt-in upstream; `PREFIX_CACHE=1`
@@ -50,7 +50,7 @@ One line each; the rest of this page is the long version.
 2. **A small vLLM patch for those embeddings.** vLLM ships a dequant-on-gather
    kernel for int-quantized embedding tables but the qwen3_5 model code never
    wires it up — neither in the main model nor in the MTP draft module.
-   `patches/qwen3_5-embed-quant.patch` fixes both (two lines each).
+   `patches/0001-qwen3_5-embed-quant.patch` fixes both (two lines each).
 3. **16-bit recurrent state.** 48 of the 64 layers are Gated DeltaNet with a
    fixed recurrent state per sequence, and Qwen's config asks for it in fp32:
    ~150 MB per request, allocated up front, read and written on every decode
@@ -68,8 +68,8 @@ One line each; the rest of this page is the long version.
    rate) — but on this checkpoint it produced garbage while benchmarking
    beautifully. The kernel reads its int16-requantized group scales as
    *unsigned*, and AutoRound symmetric exports have ~50% negative scales.
-   `patches/marlin-int8-negative-scales.patch` folds the sign into the int4
-   codes at load time; `patches/marlin-int8-layer-select.patch` lets you pick
+   `patches/0003-marlin-int8-negative-scales.patch` folds the sign into the int4
+   codes at load time; `patches/0002-marlin-int8-layer-select.patch` lets you pick
    which layers get int8 activations (and keeps it off the int8-weight lm_head,
    which would otherwise refuse to load).
 5. **Cheap speculative drafts, and a draft vocabulary that covers what the
@@ -78,7 +78,7 @@ One line each; the rest of this page is the long version.
    extra draft cost ~3 ms and MTP-3 was already slower than MTP-2.
    `prepare/quant_mtp.py` requantizes the draft module (int8; the fast variant uses
    GPTQ int4, `drafter/`), `prepare/build_draft_vocab.py` builds a 40k-token draft head
-   and `patches/qwen3_5-mtp-draft-vocab.patch` makes the drafter use it. A
+   and `patches/0004-qwen3_5-mtp-draft-vocab.patch` makes the drafter use it. A
    draft now costs ~0.5-1 ms and four of them pay off. The id list matters
    more than anything else in this repo's single-user numbers: a token outside
    the draft vocabulary can never be proposed, so it is a guaranteed rejection
@@ -87,26 +87,26 @@ One line each; the rest of this page is the long version.
    it generates (96% on code); the earlier web-text list covered 92% (83% on
    code) and cost 10% of single-stream throughput on its own.
 6. **Two decode-path patches for the multi-query verify step.**
-   `patches/spec-decode-attn.patch`: FlashAttention-2 only splits the KV
+   `patches/0007-spec-decode-attn.patch`: FlashAttention-2 only splits the KV
    sequence across thread blocks when a request has one query token; the MTP
    verify step has five, so a 24-head model runs attention on 24 of the 3090's
    82 SMs — 57 µs per layer at 1.5k context, 1.3 ms at 16k. A small Triton
-   split-KV kernel replaces it (23 µs / 120 µs). `patches/sampler-small-topk-
-   fast-softmax.patch`: vLLM's top-k/top-p masking sorts the whole 248k vocab
-   for every row and its softmax runs one thread block per row (140 µs for a
-   single 248k-wide row, called several times per step); with top-k ≤ 64 known
-   on the host the mask is one `torch.topk`, the softmax is multi-block, and
-   drafts are sampled from the same truncated support as the target. Together
-   +4% at default sampling.
+   split-KV kernel replaces it (23 µs / 120 µs).
+   `patches/0006-sampler-small-topk-fast-softmax.patch`: vLLM's top-k/top-p
+   masking sorts the whole 248k vocab for every row and its softmax runs one
+   thread block per row (140 µs for a single 248k-wide row, called several
+   times per step); with top-k ≤ 64 known on the host the mask is one
+   `torch.topk`, the softmax is multi-block, and drafts are sampled from the
+   same truncated support as the target. Together +4% at default sampling.
 7. **Tuned flags that are easy to get wrong**, each documented in the launch
    scripts and the gotchas below, plus vLLM PR
    [#50021](https://github.com/vllm-project/vllm/pull/50021) vendored as
-   `patches/vllm-pr50021-gdn-spec-bounds.patch` (bounds checks in the DeltaNet
+   `patches/0005-vllm-pr50021-gdn-spec-bounds.patch` (bounds checks in the DeltaNet
    speculative-decode kernels; we hit the illegal-memory-access it fixes with
    several concurrent MTP requests).
 8. **Speculation that reads the context.** A block drafter sees a 2,048-token window; a
    long-context assistant spends much of its output reproducing what it was given.
-   `patches/dflash2-lookup-drafting.patch` proposes the continuation of the most recent
+   `patches/0011-dflash2-lookup-drafting.patch` proposes the continuation of the most recent
    earlier occurrence of what was just generated — from anywhere in the request's own
    history — with a point-mass draft distribution so the verify stays exact. Because those
    tokens cost the drafter nothing, the verify block is no longer capped at the drafter's
@@ -142,7 +142,7 @@ head_dim 256 has no faster sm86 alternative (FlashInfer measured within 1.5%,
 and it costs the split-KV verify path at decode).
 
 **int8-QK prefill attention** (`PREFILL_ATTN=int8`,
-`patches/prefill-attn-int8.patch`) attacks what is left after the GEMMs: the
+`patches/0024-prefill-attn-int8.patch`) attacks what is left after the GEMMs: the
 16 full-attention layers, whose head_dim of 256 pins FA2 at 54-57 TFLOPS on
 sm86 (85% of the card's practical fp16 mma rate — no fp16 rewrite can win).
 A Triton kernel runs QK^T on int8 tensor cores at 2x the fp16 rate,
@@ -180,7 +180,7 @@ Things this campaign measured that did NOT pay, so nobody re-walks them:
   standalone sweep (min-of-rounds, burst clocks) shows +2-20% per GEMM over
   stock tiles at M=2048 — and exactly +0.4% end-to-end, because sustained
   250 W throttling flattens the differences the bursts show.
-  `patches/marlin-tune-table.patch` ships the wiring anyway (off by default,
+  `patches/0023-marlin-tune-table.patch` ships the wiring anyway (off by default,
   `VLLM_MARLIN_TUNE=1`) for cards running without a power cap.
 - `INT8_LAYERS="mlp|linear_attn"` (the GDN-only middle point) crashes at
   first forward — an inductor codegen bug with the mixed set on this
@@ -198,7 +198,7 @@ the bf16 model it reports 4.80 tokens per step vs 4.28 for MTP at the same block
 size. What it took to make it pay on a 24 GB card, in order:
 
 1. **Backport.** vLLM's support is [PR #52816](https://github.com/vllm-project/vllm/pull/52816)
-   on main, on the V2 model runner. `patches/dflash2-backport.patch` carries it to
+   on main, on the V2 model runner. `patches/0009-dflash2-backport.patch` carries it to
    0.27.1 plus the pieces of main it silently relies on (sentinel `-1` sample
    rows, sliding-window null-block guards, K draft slots, NaN guards) and one
    semantic fix: 0.27.1 caches temperature-*applied* draft logits, main caches
@@ -226,7 +226,7 @@ size. What it took to make it pay on a 24 GB card, in order:
    GSM8K 96.0-96.5%).
 
 4. **Getting the context back to 64k** took a second patch
-   (`patches/hybrid-kv-groups-v2-cudagraph.patch`), because the first version of
+   (`patches/0010-hybrid-kv-groups-v2-cudagraph.patch`), because the first version of
    this mode capped out at 40k. vLLM sizes a hybrid model's KV groups by the
    *smallest* bucket of same-type layers — with the drafter that is its 5
    sliding-window layers, so the target's 16 attention layers were padded to 20
@@ -246,7 +246,7 @@ size. What it took to make it pay on a 24 GB card, in order:
 The drafter reads a 2,048-token window. A long-context assistant spends much of its output
 *reproducing* things — quoting a document, listing commands it was shown, rewriting a
 paragraph while keeping the code — and those tokens are sitting verbatim in the prompt, tens
-of thousands of tokens beyond what the drafter can see. `patches/dflash2-lookup-drafting.patch`
+of thousands of tokens beyond what the drafter can see. `patches/0011-dflash2-lookup-drafting.patch`
 scans the request's own token history (the buffer vLLM already keeps) for the most recent
 occurrence of the longest suffix of what has been generated so far, and proposes the tokens
 that followed it — one Triton program per request, batch-size independent, with an

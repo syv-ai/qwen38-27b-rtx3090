@@ -17,7 +17,7 @@ model's default sampling (temperature 1.0, top-p 0.95, top-k 20):
    (default 1.0) can sharpen the draft distribution; measured no gain here.
 
 Apply from the repo root:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/sampler-small-topk-fast-softmax.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0006-sampler-small-topk-fast-softmax.patch
 
 diff --git a/v1/sample/metadata.py b/v1/sample/metadata.py
 index fa4ceac8..1560b83f 100644

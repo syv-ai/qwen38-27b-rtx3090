@@ -25,7 +25,7 @@ on and what our stack needs:
     dequantizes k/v rows from a W4A16 (compressed-tensors) qkv_proj so the drafter itself
     can be requantized (prepare/fetch_dflash2.py / drafter/quant_dflash2.py); flashinfer.top_k
     falls back to torch.topk if its JIT build fails (VLLM_DFLASH2_TORCH_TOPK=1 forces
-    torch.topk); the V2 sampler passes k_max so patches/sampler-small-topk-fast-softmax's
+    torch.topk); the V2 sampler passes k_max so patches/0006-sampler-small-topk-fast-softmax's
     sort-free small-k top-k/top-p path is used under the V2 runner too; the selector
     walk applies the request's top-k/top-p to its 16-candidate proposal and caches the
     truncated q (the DFlash2 analogue of the MTP draft truncation; lossless;
@@ -33,9 +33,9 @@ on and what our stack needs:
     sampling-state buffers to the speculator.
 
 Apply from the installed vllm package directory, after the other patches:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/dflash2-backport.patch
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/0009-dflash2-backport.patch
 
-Written against vLLM 0.27.1 (requires patches/sampler-small-topk-fast-softmax.patch for
+Written against vLLM 0.27.1 (requires patches/0006-sampler-small-topk-fast-softmax.patch for
 the k_max argument). Reapply after upgrades.
 
 --- a/config/vllm.py
