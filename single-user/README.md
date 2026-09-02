@@ -369,6 +369,29 @@ systemctl --user enable --now qwen-serving
 loginctl enable-linger $USER
 ```
 
+The unit runs `qwen-server.sh`, which boots the launcher, waits for
+`/health`, runs `bench/warmup.sh` (the optional post-boot serving warmup,
+`WARMUP=1` is the unit's default; `WARMUP=0` restores the legacy boot
+behavior), and only then considers the server ready for traffic.
+
+### Post-boot serving warmup
+
+For tightly packed 24 GB deployments, `/health` may become available before
+all serving-path Triton / speculative-decoding variants have been exercised
+(the launcher's boot-time profile runs profiling dummies only). The optional
+wrapper waits for health, runs `bench/warmup.sh` (a small decode pass, then a
+concurrent one), and only then considers the server ready for traffic — it
+complements the kernel prewarm in #48 and does not replace it:
+
+```bash
+WARMUP=1 bash single-user/qwen-server.sh   # wait /health, warm, then serve
+WARMUP=0 bash single-user/qwen-server.sh   # legacy boot, no warmup
+```
+
+The included systemd service enables this by default
+(`Environment=WARMUP=1`). `WARMUP_ATTEMPTS` / `WARMUP_INTERVAL` tune the
+health-wait window (30 × 5 s by default).
+
 Point your chat client at `http://<host>:18020/v1` with the key from
 `api_key.txt`. Works with anything that speaks the OpenAI API, tool calling
 included (`tools` + `tool_choice: "auto"` come back as `tool_calls`).
@@ -392,7 +415,8 @@ included (`tools` + `tool_choice: "auto"` come back as `tool_calls`).
 | `TOOLS` | 1 | tool/function calling (`--enable-auto-tool-choice --tool-call-parser`). `TOOL_PARSER` (`qwen3_coder`) must match the XML call format this model's chat template emits — `hermes` parses the JSON a Qwen model does *not* produce here, and fails silently. 0 = off, and `tool_choice: "auto"` then 400s |
 | `VISION` | 0 | 1 keeps the vision tower instead of `--language-model-only` (0.858 GiB of BF16 weights on this checkpoint), for a client that sends images: one image per prompt and a 2048-image-token pixel cap, both overridable from `EXTRA_ARGS` |
 | `VISION_OFFLOAD` | 1 | with `VISION=1`, keeps the tower's weights in pinned host RAM and copies each module to the GPU for its own forward (`patches/vision-tower-cpu-offload.patch`). **On 24 GB, `SPEC=dflash2` + `VISION=1` does not boot with this off** — the tower is 0.85 GiB of the ~1.1 GiB transient margin, and graph capture OOMs allocating the 960 MiB split-KV verify buffer with 787 MiB free. With it on, the same config comes up at the full 69,758-token pool and reads images. Costs 296 → 333 ms of encode per 8192-patch image, output bit-exact. 0 only on a card with headroom to spare. `VLLM_VISION_CPU_OFFLOAD_GB` (default 1) is the budget in GiB |
-| `REQ_METRICS` | 0 | 1 = `--enable-per-request-metrics --enable-force-include-usage`: per-request timing fields in every response and `usage` on every request, the fields llama-swap's dashboard reads ([#51](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/51)). `prompt_tokens_details.cached_tokens` is always on. Not compatible with `--disable-log-stats` in `EXTRA_ARGS`; vLLM's per-request spec-decode summary flag is nightly-only, not in 0.27.1 |
+| `REQ_METRICS` | 0 | 1 = `--enable-per-request-metrics --enable-force-include-usage`: per-request timing fields in every response and `usage` on every request, the fields llama-swap's dashboard reads ([#51](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/51)). `prompt_tokens_details.cached_tokens` is always on. Not compatible with `--disable-log-stats` in `EXTRA_ARGS`; vLLM's per-request *spec-decode* summary flag is nightly-only, not in 0.27.1 |
+| `WARMUP` | 1 | wrapper-only: 1 = wait `/health` then run `bench/warmup.sh` before serving (see "Post-boot serving warmup"); 0 = legacy boot. The unit sets this explicitly. Not read by `start_qwen.sh` itself |
 | `PORT` | 18020 | |
 
 ## Switching modes
