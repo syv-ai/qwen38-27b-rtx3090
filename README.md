@@ -454,10 +454,18 @@ kernel, which the drafter's 8-row draft block needs
 The trade: the Triton attention backend plus the per-step int4 unpack cost
 about 20% of decode against the shipped config on short prompts (~86 vs ~104
 tok/s e2e on the same probe), and — unlike KVarN, which has GSM8K and
-100k-needle numbers above — **int4-KV quality at depth is unmeasured here**.
-Tool calling round-trips correctly and the lookup lane works; treat the rest
-as experimental until someone runs the quality harness on it, which is a
-contribution this README will gladly take.
+100k-needle numbers above — int4-KV quality at depth now reads:
+
+| metric | result |
+|---|---|
+| GSM8K exact-match (200 questions, greedy, thinking off) | **96.0%** |
+| 100k-token needle at 90% depth (`bench/needle_test.py`) | **retrieved** |
+
+Measured on an RTX 4090 (24 GB) with `bench/quality_battery.py int4kv --gsm-only
+--gsm-n 200` and `bench/needle_test.py 100000 0.9`; the 96.0% sits inside the band
+the other configurations read (95.0-96.5%, docs/quality.md). Tool calling
+round-trips correctly and the lookup lane works; the rest of this configuration
+is still experimental.
 
 ### More than one GPU
 
