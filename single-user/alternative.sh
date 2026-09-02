@@ -68,7 +68,7 @@ ASYNC_ARGS=$([ "$ASYNC_SCHED" = 1 ] && echo --async-scheduling || echo --no-asyn
 
 # REQ_METRICS=1: per-request timing fields + usage on every response (issue #51).
 # Not with --disable-log-stats (the timing fields need the engine-stats path).
-METRICS_ARGS=$([ "${REQ_METRICS:-0}" = 1 ] && echo --enable-per-request-metrics --enable-force-include-usage)
+METRICS_ARGS=$([ "${REQ_METRICS:-0}" = 1 ] && echo --enable-per-request-metrics --enable-force-include-usage || true)
 
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
