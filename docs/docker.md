@@ -15,10 +15,17 @@ configured as a runtime. The 250 W power limit is a host setting
 
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
-echo "VLLM_API_KEY=$(openssl rand -hex 24)" > .env   # all knobs live in .env (gitignored)
+cp .env.example .env                              # all knobs live in .env (gitignored)
+# PowerShell: Copy-Item .env.example .env
+# Set VLLM_API_KEY in .env before exposing the server beyond this machine.
 docker compose --profile single up -d               # or --profile batch
 docker compose logs -f single
 ```
+
+The example enables the repo's recommended single-user DFlash2 profile. On
+Docker Desktop with WSL2, leave `VLLM_WSL2_ENABLE_PIN_MEMORY=1` enabled; it is
+required by the V2 runner before model loading begins. The detailed failure
+signature and other WSL2 workarounds are below.
 
 **The image is prebuilt**: every push to `main` builds and pushes
 `ghcr.io/syv-ai/qwen38-27b-rtx3090:latest` (plus an immutable `sha-<7>` tag

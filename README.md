@@ -18,9 +18,18 @@ on port 18020. Pick a mode — one GPU serves one at a time:
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
 
+cp .env.example .env                 # Linux / WSL
+# PowerShell: Copy-Item .env.example .env
+
 docker compose --profile single up -d    # one or a few people chatting
 docker compose --profile batch  up -d    # API backend, many concurrent requests
 ```
+
+The example uses the recommended single-user `SPEC=dflash2` profile. If Docker
+Desktop is using WSL2, keep `VLLM_WSL2_ENABLE_PIN_MEMORY=1` enabled in `.env` or
+the V2 runner will abort with `RuntimeError: UVA is not available`. The example
+leaves API-key authentication disabled for local-only use; set `VLLM_API_KEY`
+before exposing the server beyond this machine.
 
 | | `--profile batch` → [batch/](batch/) | `--profile single` → [single-user/](single-user/) |
 |---|---|---|
