@@ -790,6 +790,23 @@ Tool calling works over the same endpoint — send `tools` with `tool_choice:
 read Qwen's XML call format, which is what this model's chat template emits —
 not the JSON that `hermes` reads. `TOOLS=0` turns it off.
 
+### OpenCode (optional)
+
+The repository includes an optional [OpenCode](https://opencode.ai) workspace
+configuration in [`opencode.json`](opencode.json). With the server running,
+install the OpenCode CLI, start it from this repository, and select
+`qwen-local/qwen3.8-27b` if it is not already the active model:
+
+```bash
+opencode
+```
+
+The configuration targets `http://127.0.0.1:18020/v1` and the served model name
+`qwen3.8-27b`. If you change `PORT` or enable `VLLM_API_KEY`, update the
+OpenCode provider settings accordingly. The `local` API-key value in the
+workspace config is only a placeholder for the default unauthenticated local
+server; it is not a secret.
+
 To check the numbers on your own card: `bash verify.sh` (also probes the live
 server and prints which attention backend and KV pool it came up with), then
 `bash bench/run_benchmarks.sh batch` or `... single` reproduces the tables
