@@ -177,3 +177,34 @@ hard abort rather than a tuning question:
      kernel**, and that ninja build can fail here. `EXTRA_ARGS="--kv-cache-dtype
      auto"` sidesteps it — `EXTRA_ARGS` is last on the command line, so it wins
      over `KV_ARGS`.
+
+6. **Windows host memory can kill the CPU-only prepare step.** An exit 137 while
+   `prepare/quant_lm_head.py` is running, with little VRAM in use, is WSL/Docker
+   host-memory pressure rather than a GPU OOM. Give WSL enough memory and swap in
+   `%USERPROFILE%\\.wslconfig`, for example:
+
+   ```ini
+   [wsl2]
+   memory=20GB
+   swap=8GB
+   processors=8
+   ```
+
+   Run `wsl --shutdown` after changing the file, then restart Docker Desktop.
+   If the first preparation still exceeds the available host memory, set
+   `FAST_VARIANT=0` in `.env` to skip the optional ~1 GB fast-variant download;
+   this reduces the first-boot footprint but does not change the base model.
+
+   Keep Linux venv files on WSL's native filesystem when the checkout is under
+   `/mnt/c`. Some Ubuntu/DrvFs combinations fail during `python3 -m venv venv`
+   with an `ensurepip` or `Operation not permitted` error. Create the venv under
+   `$HOME` and link it into the checkout instead:
+
+   ```bash
+   python3 -m venv "$HOME/qwen38-venv"
+   ln -s "$HOME/qwen38-venv" venv
+   ```
+
+   The model directory may remain on the Windows-mounted checkout; only the
+   Linux venv needs native WSL storage. This workaround is for the manual WSL
+   venv path. The prebuilt Docker image already contains its own venv.
