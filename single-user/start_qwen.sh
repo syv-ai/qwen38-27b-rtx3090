@@ -354,11 +354,15 @@ if [ "$SPEC" = "dflash2" ]; then
       export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
     fi
   elif [ "$DRAFT_TOKENS" -gt 7 ]; then
-    # 4 slots and 56k instead of 8 and 64k: the aligned state pages and the bigger decode
+    # 4 slots and 55k instead of 8 and 64k: the aligned state pages and the bigger decode
     # graphs are what the long block costs, and this is where they still fit next to the
-    # 5.2 GiB pool (57,669 tokens). DFLASH_TOKENS=7 gets 8 slots and 64k back.
+    # 5.2 GiB pool. DFLASH_TOKENS=7 gets 8 slots and 64k back. 56320 rather than 57344:
+    # at this pin one 57344-token request needs about 10 MiB more than the pool holds, so a
+    # 3090 refuses the boot ("estimated maximum model length 57120") and a 4090 under WSL2
+    # boots only because the shortfall spills into host memory (#25, item 9). 1024 tokens
+    # is about 78 MB of pool at this geometry, so 55 x 1024 leaves real margin.
     MAX_SEQS=${MAX_SEQS:-4}
-    MAX_LEN=${DFLASH_MAX_LEN:-57344}
+    MAX_LEN=${DFLASH_MAX_LEN:-56320}
     KV_MEM=${KV_MEM-5583457484}
     # Decode graphs are captured for both block lengths (the drafter's and the full verify
     # block), or the short step -- the common one -- runs piecewise and costs 8%. That is
