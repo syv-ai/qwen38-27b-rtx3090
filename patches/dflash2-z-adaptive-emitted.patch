@@ -1,21 +1,26 @@
-diff --git a/v1/worker/gpu/spec_decode/dflash/speculator.py b/v1/worker/gpu/spec_decode/dflash/speculator.py
-index 1bd78be21..0556bcbb4 100644
---- a/v1/worker/gpu/spec_decode/dflash/speculator.py
-+++ b/v1/worker/gpu/spec_decode/dflash/speculator.py
-@@ -362,7 +362,7 @@ class DFlashSpeculator(DraftModelSpeculator):
-         # sampling slots it was given (bonus + drafts), num_rejected how many of those were
-         # thrown away, so the difference is the tokens it emitted. dflash2/lookup.py decides
-         # the next block length from it.
+--- a/v1/worker/gpu/spec_decode/dflash/speculator.py	2026-09-05 00:21:38.703248441 +0000
++++ b/v1/worker/gpu/spec_decode/dflash/speculator.py	2026-09-05 00:21:38.735250379 +0000
+@@ -358,11 +358,12 @@
+         is_profile: bool = False,
+     ) -> torch.Tensor:
+         num_reqs = input_batch.num_reqs
+-        # What the step that just ran actually produced per request: num_sampled counts the
+-        # sampling slots it was given (bonus + drafts), num_rejected how many of those were
+-        # thrown away, so the difference is the tokens it emitted. dflash2/lookup.py decides
+-        # the next block length from it.
 -        self.last_num_emitted = (num_sampled - num_rejected) if num_sampled is not None else None
++        # What the step that just ran actually produced per request. num_sampled is the
++        # count the sampler EMITTED (bonus + accepted drafts): input_batch.py defines
++        # num_rejected = num_logits - num_sampled, so subtracting num_rejected here would
++        # double-count the rejections. dflash2/lookup.py decides the next block length
++        # from this number.
 +        self.last_num_emitted = num_sampled if num_sampled is not None else None
          num_target_tokens = input_batch.num_tokens
          num_query_tokens = num_reqs * self.num_query_per_req
          max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
-diff --git a/v1/worker/gpu/spec_decode/dflash2/speculator.py b/v1/worker/gpu/spec_decode/dflash2/speculator.py
-index 1371aab30..ac0d41df0 100644
---- a/v1/worker/gpu/spec_decode/dflash2/speculator.py
-+++ b/v1/worker/gpu/spec_decode/dflash2/speculator.py
-@@ -516,9 +516,7 @@ class DFlash2Speculator(DFlashSpeculator):
+--- a/v1/worker/gpu/spec_decode/dflash2/speculator.py	2026-09-05 00:21:38.707248685 +0000
++++ b/v1/worker/gpu/spec_decode/dflash2/speculator.py	2026-09-05 00:21:38.735250379 +0000
+@@ -519,9 +519,7 @@
          self.draft_max_seq_len = min(
              max_seq_len + self.num_query_per_req, self.max_model_len
          )
