@@ -882,3 +882,53 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     block is not free on int4**: at 15 the pool is 53,908 tokens against
     142,843 at 7, and the 256k default no longer fits (`estimated maximum
     model length is 180320`, a clear `ValueError` rather than an assert).
+
+53. **On WSL2 the card's usable dedicated memory is about half a gigabyte
+    smaller than the same card on bare metal, the shipped `SPEC=dflash2` boot
+    sits about 50 MiB under that line, and anything larger runs slow instead
+    of failing.** Windows accounts each adapter's memory as *dedicated* (on
+    the card) and *shared* (host memory the driver backs GPU allocations
+    with). On two RTX 4090s under WSL2 the dedicated figure tops out at about
+    23,371 MiB of a 24,564 MiB card, where a bare-metal 3090 of the same size
+    reports 23.3 GiB free at boot (the engine's log figure), about 490 MiB more. The default `SPEC=dflash2 CTX=fast` boot
+    lands about 50 MiB under the ceiling. Anything that adds to the working
+    set crosses it, and crossing it does not fail: the remainder lands in
+    host shared memory and the step runs two to six times slower, with
+    nothing in vLLM's log to show it. Four separately discovered "4090 costs"
+    were this one thing, each measured over the line and then with room:
+
+    | working set | over the line | with room |
+    |---|---|---|
+    | `DFLASH_TOKENS=15` (about 420 MiB over) | 56.5 ms/step | 23.4 |
+    | verify-kernel query maximum 16 at width 7 | 63.5 | 23.2 |
+    | a boot that recompiles the drafter's graph while loading the backbone's (about 300 MiB more) | 45.0 | 23.2 |
+    | a 4 GiB bf16 drafter at the shipped pin (1.8 GB in host memory) | 150 to 264 | 39 |
+
+    Three things to know and one to do:
+
+    - **Read the counters, not the log.** `nvidia-smi` shows the card full
+      either way. The Windows performance counters
+      `\GPU Adapter Memory(*)\Dedicated Usage` and `\Shared Usage`
+      (PowerShell `Get-Counter`, sampled every 10 s) show the split: shared
+      usage at its idle baseline (about 86 MiB here) through a run means the
+      working set is on the card; anything above it means part of it is not.
+      Gotcha 43's `nvidia-smi dmon` power-and-SM signature is the same state
+      seen from the other side.
+    - **Acceptance is untouched; only step costs lie.** The spill moves memory,
+      not arithmetic. Accepted-tokens-per-step columns from a spilled run
+      stand; its tok/s does not.
+    - **Boot class and memory state have to be matched before two hosts are
+      compared.** With both matched, a 4090 under WSL2 and a bare-metal 3090
+      agree on a drafter to a few percent; every cross-host "penalty" in the
+      #25 thread that did not survive came from one of the two being
+      unmatched.
+    - **Give it room.** `KV_MEM=3000000000 DFLASH_MAX_LEN=8192` runs every
+      configuration in the table at its bare-metal speed and costs the shipped
+      head nothing at width 7 (23.3 against 23.2 ms/step, 3.77 against 3.80
+      tokens/step). `SPEC_ATTN=0` frees about a gigabyte of graph capture
+      (1.32 against 0.33 GiB, the same on a 3090), which on this host is the
+      difference between fitting and not; on bare metal the room absorbs it.
+
+    Measured in the
+    [#25](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/25) comments of
+    2026-09-05 (items 13 and 14, and the corrections to items 9 and 11).

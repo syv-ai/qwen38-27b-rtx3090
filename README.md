@@ -215,6 +215,15 @@ name: `VLLM_WSL_PIN_MEMORY` is **not** a vLLM variable and setting it does
 nothing — this README named it for 22 minutes on 2026-08-21 (`589daae`, fixed in
 `27f51fa`), so a tree cloned in that window will have it.
 
+**On WSL2 the usable dedicated memory is about half a gigabyte less than the
+same card on bare metal, and the shipped `SPEC=dflash2` boot sits about 50 MiB
+under it.** Anything larger (a wider verify block, a bigger drafter, a raised
+pin, a boot that recompiles a graph) runs two to six times slower instead of
+failing, and the log does not say so; `nvidia-smi` looks the same either way.
+Gotcha 53 has the counters to read, the four costs that turned out to be this,
+and the profile that gives it room (`KV_MEM=3000000000 DFLASH_MAX_LEN=8192`,
+free for the shipped head at width 7).
+
 One knob this mode used to set for you, and now sets only for MTP:
 `cudagraph_mode=PIECEWISE`. Prefix caching and a *captured* (FULL) verify step
 did not mix on this path. On WSL2 that showed up as acceptance collapsing to
