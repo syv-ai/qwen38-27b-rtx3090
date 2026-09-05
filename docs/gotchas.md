@@ -882,3 +882,82 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     block is not free on int4**: at 15 the pool is 53,908 tokens against
     142,843 at 7, and the 256k default no longer fits (`estimated maximum
     model length is 180320`, a clear `ValueError` rather than an assert).
+
+53. **A benchmark row without its compile-cache state is not reproducible, because the
+    autotuner's timing race picks the kernels and the kernels pick the trajectory.**
+    Filed as [#75](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/75). Six Triton
+    kernels in the chunked Gated DeltaNet path are autotuned at first use; vLLM caches the
+    winners, but a fresh container or `VLLM_DISABLE_COMPILE_CACHE=1` re-runs the race, and a
+    different winner is a different reduction order, a different last bit, and at greedy a
+    different token at the first near tie. Measured on one image with the cache wiped before
+    each boot: 8 boots, 8 distinct winner sets, 5 distinct trajectories, the same twelve-turn
+    tool conversation ranging from 58 to 189 tool calls. With the cache persisted, two boots
+    were identical to the call. So: mount a persistent cache into bench containers rather than
+    disabling it for hygiene, and copy the `*.autotune.json` records beside a published row so
+    a reader can tell whether two rows are even comparable. A quiet bare box re-times to the
+    same winners even with the cache deleted; container timing noise is what makes the draw
+    vary. The same cache state also moves the profiled peak activation and therefore the KV
+    pool, by 0.92 GiB on the reference 3090, which is a separate channel with a separate fix
+    (state it, or pin `--kv-cache-memory`).
+
+54. **A high acceptance rate can mean the drafter is good or the generation has collapsed,
+    and the counter cannot tell you which.** Degenerate text is trivially predictable. One
+    repetition loop during the [#73](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/73)
+    work scored 79.7% acceptance per drafted token against a normal 35 to 45%, with a
+    distinct-word ratio of 0.051 against 0.77 to 0.83, and it was echoing the instruction
+    appended to its own prompt. So acceptance is heavy-tailed, a t-test over a dozen short
+    generations is the wrong instrument, and an arm that happens to sample more collapsed
+    trajectories looks like an acceptance *improvement*. Guard on drafted tokens per round
+    above about 1.2 times the drafter width (calibrated on 96 rows: above the width flags 40%
+    of ordinary rows, above 1.2 times it flags only the real events), or on distinct-word
+    ratio when the text is available. The guard reads the engine's own repetition signal,
+    because adaptive verify length extends the block only while a request is reproducing its
+    context. Run the guard **before** any stratification on block size: a degenerate row sorts
+    into the long-block stratum by construction and one such row moved a stratum estimate by
+    two tokens per step.
+
+55. **Per-request acceptance figures depend on what ran before the request, and on some boxes the
+    request's whole trajectory does.** Two observations, two boxes. On a quiet native 3090, same
+    build, same seeds, one boot, only the request order changed: drafts and accepted tokens came back
+    identical on every seed and drafted tokens did not, so `1 + accepted / drafts` repeated exactly
+    while `accepted / drafted` had an order-dependent denominator. On an RTX 4090 under WSL2 with a
+    prompt that keeps the long block engaged, the same design changed drafts and accepted tokens too
+    on four of six seeds, one seed by a factor of two, so there tokens per step itself moved with
+    order. Two mechanisms, both real: the long block is sticky and coasts on prior state without
+    consulting the emitted count, so a request that follows a long-block request inherits some of its
+    block length; and a different block length is a different verify batch shape, which on a
+    numerically knife-edged model can flip a near-tie token even with the seed fixed. Prefix caching
+    was the obvious third candidate, since the requests share a prompt; with the engine started
+    `--no-enable-prefix-caching` and the log confirming it, the order effect was unchanged, so it
+    is not the driver. What follows is the same either way: hold the request
+    order fixed within a comparison, report tokens per step rather than acceptance per drafted token,
+    and treat per-request figures from a sequence as dependent samples, never as independent ones.
+
+56. **At `DFLASH_TOKENS=15` on ordinary text the engine drafts 7 and queries 8, so 15 and 7 are
+    the same experiment unless the text repeats.** With the lookup on, the drafter's block is
+    clamped to the checkpoint's trained block (7), `num_query_per_req` follows it (8), and
+    adaptive verify length asks for the long block only while a request is reproducing its
+    context (`dflash2/speculator.py`, on by default). Measured over sixty single-prompt rows
+    on the reference 3090: 55% at exactly 7.000 drafted tokens per round, and the lookup
+    supplying 4.3% of the eight positions it could fill. On an eight-prompt cohort at 1024
+    output tokens the long block engaged on 44% of rows and those rows ran markedly faster.
+    Consequences: matching results at both widths are weak evidence that an effect is not
+    lookup-specific; anything that acts only in the long block, including
+    `dflash2-z-adaptive-emitted.patch`, is invisible on a short single-prompt cell and only
+    shows on a cohort; and `VLLM_DFLASH2_LOOKUP_CHEAP_CTX` (default 0, so the branch is dead)
+    takes the long block unconditionally below a context threshold and would invalidate any
+    bisect run across it.
+
+57. **Two passes with a fixed seed are two replays, and a short single-prompt cell cannot see a
+    cohort-scale effect at any number of seeds.** The engine seeds from zero and the noise draw
+    is a function of seed and position, so repeat boots on a quiet box come back bit-identical
+    on every counter, and "reproducible to three significant figures from two passes" measures
+    a deterministic harness rather than bounding an effect. The 16% DFlash2 acceptance
+    regression in [#73](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/73) was invisible
+    on one README prompt at 256 output tokens with six seeds *and* with thirty (seed spread
+    ten points, sd about four), and reproduced immediately through `bench/prefill_ab.sh` on the
+    cohort at 1024. Prompt choice alone moved acceptance from 22.7% on the cohort to 36.8% on a
+    236-character prompt, larger than the regression. Three different questions were asked of
+    that short cell during the bisect and it was underpowered for all of them. Match the
+    workload to the claim, vary the seed per request, and read a bare number from a fixed-seed
+    pass as one draw.
