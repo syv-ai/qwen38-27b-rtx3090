@@ -1,0 +1,170 @@
+Backport vLLM PR #51034: SSE keep-alive comments for idle streaming responses.
+
+When a long request is queued or in prefill, vLLM streams no bytes for many
+seconds, and the reverse proxy / tunnel in front (Bifrost here, minimum idle
+of 120s unless configured, and its idle timer counts real body bytes only --
+TCP keepalive probes do not reset it) closes the connection, dropping the
+answer. This backports the upstream `with_sse_keep_alive` wrapper plus the
+--sse-keep-alive-interval CLI flag, which emit an SSE comment line (": keep-
+alive") whenever a streaming /v1/chat/completions or /v1/completions response
+is idle for the configured number of seconds. SSE-compliant clients ignore
+the comments; proxies still count the bytes.
+
+Upstream: commit 585bb07c7 (PR #51034) applied to vLLM 0.28.0. The three
+original hunks landed unchanged; paths are relative to the vllm package
+(patch -p1 -d <site-packages>/vllm). Deviations from upstream:
+  - tests dropped (this repo patches the installed package, no test tree)
+  - single-user frontend args, so the flag is --sse-keep-alive-interval
+    (set in start_qwen.sh)
+
+diff -ruN a/entrypoints/openai/chat_completion/api_router.py b/entrypoints/openai/chat_completion/api_router.py
+--- a/entrypoints/openai/chat_completion/api_router.py	2026-09-06 04:04:51.233097079 +0300
++++ b/entrypoints/openai/chat_completion/api_router.py	2026-09-06 04:04:51.233585309 +0300
+@@ -15,6 +15,7 @@
+ )
+ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+ from vllm.entrypoints.openai.engine.protocol import ErrorResponse
++from vllm.entrypoints.openai.sse_keep_alive import with_sse_keep_alive
+ from vllm.entrypoints.serve.utils.api_utils import (
+     load_aware_call,
+     validate_json_request,
+@@ -71,7 +72,12 @@
+             headers=metrics_header(metrics_header_format),
+         )
+ 
+-    return StreamingResponse(content=generator, media_type="text/event-stream")
++    args = getattr(raw_request.app.state, "args", None)
++    keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)
++    return StreamingResponse(
++        content=with_sse_keep_alive(generator, float(keep_alive_interval)),
++        media_type="text/event-stream",
++    )
+ 
+ 
+ @router.post(
+diff -ruN a/entrypoints/openai/cli_args.py b/entrypoints/openai/cli_args.py
+--- a/entrypoints/openai/cli_args.py	2026-09-06 04:04:51.233131303 +0300
++++ b/entrypoints/openai/cli_args.py	2026-09-06 04:04:51.233614304 +0300
+@@ -137,6 +137,13 @@
+     """If set to True, enable tracking server_load_metrics in the app state."""
+     enable_force_include_usage: bool = False
+     """If set to True, including usage on every request."""
++    sse_keep_alive_interval: int = 0
++    """Send an SSE keep-alive comment line every this many seconds when a
++    `/v1/chat/completions` or `/v1/completions` streaming response is idle
++    (queued, prefill, or between tokens), to prevent reverse proxies/tunnels
++    with read timeouts from closing the connection. Defaults to 0, which
++    disables keep-alive comments entirely.
++    """
+     enable_tokenizer_info_endpoint: bool = False
+     """Enable the `/tokenizer_info` endpoint. May expose chat
+     templates and other tokenizer configuration."""
+@@ -424,6 +431,13 @@
+     if args.enable_log_outputs and not args.enable_log_requests:
+         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+ 
++    # SSE keep-alive interval must be zero (disabled) or a positive integer.
++    if getattr(args, "sse_keep_alive_interval", 0) < 0:
++        raise ValueError(
++            "Error: --sse-keep-alive-interval must be a non-negative integer "
++            "(0 disables keep-alive comments)."
++        )
++
+     if getattr(args, "enable_per_request_metrics", False) and getattr(
+         args, "disable_log_stats", False
+     ):
+diff -ruN a/entrypoints/openai/completion/api_router.py b/entrypoints/openai/completion/api_router.py
+--- a/entrypoints/openai/completion/api_router.py	2026-09-06 04:04:51.233122006 +0300
++++ b/entrypoints/openai/completion/api_router.py	2026-09-06 04:04:51.233605447 +0300
+@@ -13,6 +13,7 @@
+ )
+ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+ from vllm.entrypoints.openai.engine.protocol import ErrorResponse
++from vllm.entrypoints.openai.sse_keep_alive import with_sse_keep_alive
+ from vllm.entrypoints.serve.utils.api_utils import (
+     load_aware_call,
+     validate_json_request,
+@@ -63,7 +64,12 @@
+             headers=metrics_header(metrics_header_format),
+         )
+ 
+-    return StreamingResponse(content=generator, media_type="text/event-stream")
++    args = getattr(raw_request.app.state, "args", None)
++    keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)
++    return StreamingResponse(
++        content=with_sse_keep_alive(generator, float(keep_alive_interval)),
++        media_type="text/event-stream",
++    )
+ 
+ 
+ def attach_router(app: FastAPI):
+diff -ruN a/entrypoints/openai/sse_keep_alive.py b/entrypoints/openai/sse_keep_alive.py
+--- a/entrypoints/openai/sse_keep_alive.py	1970-01-01 03:00:00.000000000 +0300
++++ b/entrypoints/openai/sse_keep_alive.py	2026-09-06 04:04:51.233622780 +0300
+@@ -0,0 +1,65 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""SSE keep-alive comments for idle streaming responses.
++
++Reverse proxies and tunnels (Cloudflare Tunnel, NGINX ``proxy_read_timeout``,
++AWS ALB, ...) can close a streaming connection when no bytes are sent for a
++while. That happens while a request is queued, during prefill, or in gaps
++between tokens. ``with_sse_keep_alive`` wraps the final SSE generator and emits
++a comment line (``": keep-alive\\n\\n"``) whenever it has been idle for
++``interval`` seconds. Comments are ignored by SSE-compliant clients but still
++count as bytes for proxy read-timeout logic.
++"""
++
++import asyncio
++import contextlib
++from collections.abc import AsyncGenerator
++
++SSE_KEEP_ALIVE_COMMENT = ": keep-alive\n\n"
++
++
++def with_sse_keep_alive(
++    generator: AsyncGenerator[str, None],
++    interval: float,
++) -> AsyncGenerator[str, None]:
++    """Emit an SSE keep-alive comment when ``generator`` is idle.
++
++    A non-positive or non-finite ``interval`` returns ``generator`` unchanged,
++    so the default path has no overhead. Otherwise a keep-alive comment is
++    yielded whenever no chunk arrives within ``interval`` seconds.
++    """
++    if not 0 < interval < float("inf"):
++        return generator
++    return _keep_alive_stream(generator, interval)
++
++
++async def _keep_alive_stream(
++    generator: AsyncGenerator[str, None],
++    interval: float,
++) -> AsyncGenerator[str, None]:
++    # A single retained ``anext()`` task advances the generator; asyncio forbids
++    # concurrent ``__anext__`` calls, and ``wait_for`` would cancel the task
++    # mid-advance on timeout. ``asyncio.wait`` observes both outcomes without
++    # cancelling the pending advance.
++    next_task: asyncio.Task[str] = asyncio.create_task(anext(generator))
++    try:
++        while True:
++            done, _ = await asyncio.wait({next_task}, timeout=interval)
++            if not done:
++                yield SSE_KEEP_ALIVE_COMMENT
++                continue
++            try:
++                chunk = next_task.result()
++            except StopAsyncIteration:
++                return
++            yield chunk
++            next_task = asyncio.create_task(anext(generator))
++    finally:
++        next_task.cancel()
++        # The task outcome was already handled in the loop; suppress so cleanup
++        # never corrupts it (matching ``merge_async_iterators``).
++        with contextlib.suppress(BaseException):
++            await next_task
++        # Close the upstream generator so its cleanup runs deterministically.
++        with contextlib.suppress(BaseException):
++            await generator.aclose()
+\ В конце файла нет новой строки
