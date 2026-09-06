@@ -59,6 +59,10 @@ for step in $TODO; do
                || echo "prepare: DFlash2 drafter not fetched (optional: SPEC=dflash2 unavailable; DFLASH2=0 silences this)" ;;
   esac
 done
+# Some clients (JetBrains AI Assistant) send tool-call arguments as a JSON
+# array instead of an object; harden the templates so `|items` does not blow up
+# ("Can only get item pairs from a mapping.") once for every prepared model.
+python prepare/harden_chat_template.py
 LEFT=$(state | sed 's/\bdflash2\b//')
 [ -z "${LEFT// /}" ] || { echo "prepare: steps still missing after run: $LEFT"; exit 1; }
 echo "prepare: model ready at $BASE$([ "${FAST_VARIANT:-1}" != 0 ] && echo " (+ $BASE-fast)")"
