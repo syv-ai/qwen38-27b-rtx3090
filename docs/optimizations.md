@@ -142,7 +142,7 @@ head_dim 256 has no faster sm86 alternative (FlashInfer measured within 1.5%,
 and it costs the split-KV verify path at decode).
 
 **int8-QK prefill attention** (`PREFILL_ATTN=int8`,
-`patches/triton-prefill-attn-int8.patch`) attacks what is left after the GEMMs: the
+`patches/prefill-attn-int8.patch`) attacks what is left after the GEMMs: the
 16 full-attention layers, whose head_dim of 256 pins FA2 at 54-57 TFLOPS on
 sm86 (85% of the card's practical fp16 mma rate — no fp16 rewrite can win).
 A Triton kernel runs QK^T on int8 tensor cores at 2x the fp16 rate,

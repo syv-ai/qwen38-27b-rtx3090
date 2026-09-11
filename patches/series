@@ -1,0 +1,46 @@
+# Apply order for the vLLM patches, one basename per line.
+#
+# The Dockerfile, the README install loop, docs/python-314.md, verify.sh and
+# patches/check_vllm_series.sh all apply in THIS order, not glob order. A
+# few patches carry hunk context that an earlier patch adds (e.g.
+# prefill-attn-int8.patch inserts before spec-decode-attn.patch's split-KV
+# block and carries its lines as context), so order is a hard requirement.
+#
+#   - a new independent patch goes on the last line
+#   - a patch that must apply before an existing one is listed before it
+#
+# verify.sh and check_vllm_series.sh fail if this list and the directory
+# disagree in either direction.
+
+qwen3_5-embed-quant.patch
+marlin-int8-layer-select.patch
+marlin-int8-negative-scales.patch
+qwen3_5-mtp-draft-vocab.patch
+vllm-pr50021-gdn-spec-bounds.patch
+sampler-small-topk-fast-softmax.patch
+spec-decode-attn.patch
+speed-knobs-envs.patch
+dflash2-backport.patch
+hybrid-kv-groups-v2-cudagraph.patch
+dflash2-lookup-drafting.patch
+hybrid-sw-block-promote.patch
+spec-decode-int8-kv.patch
+xgrammar-spec-terminated.patch
+vision-tower-cpu-offload.patch
+int4-kv-per-token-head.patch
+marlin-repack-staged-sm80.patch
+offload-dflash-eagle-groups.patch
+dflash2-ngram-chains.patch
+offload-wsl2-devptr.patch
+spec-decode-int4-kv-mq3d.patch
+dflash2-prewarm.patch
+marlin-tune-table.patch
+prefill-attn-int8.patch
+spec-sampler-prewarm.patch
+mamba-align-checkpoint-order.patch
+spec-decode-scratch-token-units.patch
+mamba-chunked-prefill-align.patch
+spec-decode-scratch-within-budget.patch
+dflash2-z-adaptive-emitted.patch
+dspark-draft-quant-config.patch
+vllm-pr54282-draft-gumbel-salt.patch

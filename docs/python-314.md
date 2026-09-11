@@ -65,7 +65,10 @@ venv/bin/pip install 'vllm[bench]==0.27.1' huggingface_hub hf_transfer ninja \
   flashinfer-python flashinfer-cubin==0.6.13
 # model + requantization exactly as the README
 VP=$(venv/bin/python -c 'import vllm,os;print(os.path.dirname(vllm.__file__))')
-for p in patches/*.patch; do patch -p1 -d "$VP" < "$p"; done   # order matters
+sed -e 's/#.*//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' patches/series |
+while IFS= read -r name; do
+  patch -p1 -d "$VP" < "patches/$name"
+done   # order: patches/series
 bash verify.sh --no-server
 ```
 
