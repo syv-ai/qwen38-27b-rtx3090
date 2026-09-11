@@ -780,11 +780,16 @@ venv/bin/python prepare/fetch_thirdparty.py
 venv/bin/python prepare/quant_heads_stream.py models/Qwen3.8-27B-Uncensored-W4A16
 
 # patch vllm (all compatible patches are written against 0.28.0; reapply after upgrades)
-for p in patches/*.patch; do
-  case "$p" in
-    patches/dflash2-backport.patch) echo "skip $p (DFlash2 is native in vLLM 0.28.0)"; continue ;;
+# Order is patches/series, one basename per line: a few patches carry hunk context
+# that an earlier patch adds, so the glob order of the directory is wrong. A new
+# independent patch goes on the last line; one that must apply before an existing
+# patch is listed before it.
+sed -e 's/#.*//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' patches/series |
+while IFS= read -r name; do
+  case "$name" in
+    dflash2-backport.patch) echo "skip $name (DFlash2 is native in vLLM 0.28.0)"; continue ;;
   esac
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < "$p"
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < "patches/$name"
 done
 # optional: the KVarN 4/2-bit KV cache for 262k context (docs/long-context.md)
 bash kvarn/install.sh

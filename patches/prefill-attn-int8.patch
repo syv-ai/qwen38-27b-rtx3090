@@ -35,11 +35,10 @@ else falls through to FA2. Decode and the split-KV verify path are untouched.
 
 Apply from the installed vllm package directory, AFTER spec-decode-attn.patch:
 its flash_attn.py hunk inserts immediately before that patch's split-KV block
-and carries that block's first lines as context, so the file name sorts after
-spec-decode-*.patch on purpose -- the Docker gate and verify.sh apply
-patches/*.patch alphabetically (this is why it was named triton-... and not
-prefill-...: CI was red for four commits with 'Hunk #1 FAILED at 1038').
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/triton-prefill-attn-int8.patch
+and carries that block's first lines as context. The apply order is
+patches/series (a 453104e rename to triton-... once encoded this dependency in
+the sort order; the series file replaced it and the name came back).
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/prefill-attn-int8.patch
 
 Written against vLLM 0.27.1.
 
