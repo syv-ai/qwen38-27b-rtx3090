@@ -106,7 +106,7 @@ INT8_LAYERS=${INT8_LAYERS-mlp|linear_attn|self_attn}
 [ -n "$INT8_ACT" ] && export VLLM_MARLIN_INPUT_DTYPE=$INT8_ACT
 [ -n "$INT8_ACT" ] && [ -n "$INT8_LAYERS" ] && export VLLM_MARLIN_INT8_INCLUDE_RE=$INT8_LAYERS
 # PREFILL_ATTN=int8: int8-QK Triton attention for the hd256 full-attention
-# layers during prefill (patches/triton-prefill-attn-int8.patch): 1.27-1.35x FA2 on
+# layers during prefill (patches/prefill-attn-int8.patch): 1.27-1.35x FA2 on
 # the attention itself, worth up to ~+5% end-to-end at 51k on top of INT8_ACT
 # (1,839/1,498 tok/s at 16k/51k with both on). It is a companion to INT8_ACT, not
 # a standalone switch: on its own it moves prefill +0.3/+1.1/+3.3% at 4k/16k/51k
@@ -171,7 +171,7 @@ if [ "$SPEC" = "dflash2" ] && [ "$CTX" = "long" ]; then
   # int8 per-token-head KV on the Triton backend: the same 5.2 GiB pool holds 136,429
   # tokens instead of 69,758, because patches/hybrid-sw-block-promote.patch stops the
   # drafter's 5 sliding-window layers from taking 385 nearly-empty blocks, and
-  # patches/spec-decode-attn-int8.patch lets the split-KV verify kernel read the quantized
+  # patches/spec-decode-int8-kv.patch lets the split-KV verify kernel read the quantized
   # cache (vLLM's own Triton attention will not split KV for a multi-query verify, which
   # is every step here, and costs 7.4 ms per layer at 128k against this kernel's 1.3).
   # Costs prefill: 251 s to load a 112k document against FLASH_ATTN's ~112 s. With
