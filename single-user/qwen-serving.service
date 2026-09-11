@@ -8,7 +8,12 @@ Type=simple
 # while a previous process is still releasing VRAM, it permanently allocates a
 # smaller cache pool and throughput quietly suffers.
 ExecStartPre=/bin/bash -c "for i in $(seq 1 60); do u=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits); [ \"$u\" -lt 1000 ] && exit 0; sleep 2; done; exit 1"
-ExecStart=/bin/bash %h/qwen-serving/single-user/start_qwen.sh
+# Serving warmup: /health can become ready before all serving-path
+# Triton/speculative-decoding variants have been exercised. The wrapper runs
+# a controlled warmup (bench/warmup.sh) before production traffic;
+# WARMUP=0 skips it (legacy boot behavior).
+Environment=WARMUP=1
+ExecStart=/bin/bash %h/qwen-serving/single-user/qwen-server.sh
 Restart=on-failure
 RestartSec=20
 StandardOutput=append:%h/qwen-serving/qwen.log
