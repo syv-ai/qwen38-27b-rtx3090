@@ -885,7 +885,7 @@ bug, `python bench/residue_sweep.py <tag>` (all 128 residues) with
 | | |
 |---|---|
 | [docs/optimizations.md](docs/optimizations.md) | Every optimization in full: why it was needed, what it measured, which patch implements it. Includes the two speculative-decoding modes (MTP and DFlash2) and the lookup drafter. |
-| [docs/gotchas.md](docs/gotchas.md) | 53 things that each cost us hours — read before debugging something that looks like a vLLM bug. |
+| [docs/gotchas.md](docs/gotchas.md) | 54 things that each cost us hours — read before debugging something that looks like a vLLM bug. |
 | [docs/quality.md](docs/quality.md) | IFBench, perplexity and GSM8K per configuration. |
 | [docs/docker.md](docs/docker.md) | The container image, and an independent WSL2 reproduction. |
 | [docs/kv-sharing.md](docs/kv-sharing.md) | Cross-layer KV cache sharing for the 16 full-attention layers: an unmeasured experiment (`KV_SHARE=group:2`) that would cut the global KV cache 2-4x if the quality holds, plus why the DeepSeek-V4.1-Flash prefill trick does not port to this model. |
