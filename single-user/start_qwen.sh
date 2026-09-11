@@ -119,6 +119,25 @@ INT8_LAYERS=${INT8_LAYERS-mlp|linear_attn|self_attn}
 # without quantization (a debugging mode); empty keeps FA2.
 PREFILL_ATTN=${PREFILL_ATTN-}
 [ -n "$PREFILL_ATTN" ] && export VLLM_PREFILL_ATTN=$PREFILL_ATTN
+# KV_SHARE: cross-layer KV cache sharing for the 16 full_attention layers
+# (patches/qwen3_5-kv-cache-sharing.patch). "group:N" groups consecutive
+# full_attention layers N at a time and gives the cache to the first of each;
+# "suffix:K" keeps the first K owners and points every later layer at the K-th
+# (You Only Cache Once layout). group:2 halves the global KV cache, group:4
+# quarters it, which at fp16 is 64 -> 32 -> 16 KiB per token.
+#
+# EXPERIMENTAL, and off for a reason: these layers were never trained to share,
+# so the quality cost is unmeasured and expected to be real. It boots and
+# answers fluently in either layout -- that is not evidence. bench/kv_share_sweep.py
+# runs the arms and scores them; docs/kv-sharing.md has the protocol. Do not put
+# this in a production unit until that sweep has a number attached.
+#
+# It changes the KV pool arithmetic, so the MAX_LEN each CTX profile picks below
+# is no longer the right ceiling: the same pinned KV_MEM now holds 2-4x the
+# tokens. Set MAX_LEN yourself when sweeping, or the profile will leave the
+# extra context on the floor.
+KV_SHARE=${KV_SHARE-}
+[ -n "$KV_SHARE" ] && export VLLM_QWEN_KV_SHARE=$KV_SHARE
 # 0.93 here, NOT batch mode's 0.972: the DeltaNet workspace in the MTP decode
 # path allocates beyond the startup memory profile (docs/gotchas.md, gotcha 4).
 GPU_UTIL=${GPU_UTIL:-0.93}

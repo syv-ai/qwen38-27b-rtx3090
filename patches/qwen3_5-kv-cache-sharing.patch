@@ -1,0 +1,166 @@
+Let the Qwen3.5 full_attention layers share one another's KV cache, so the
+global KV cache can be 2x or 4x smaller at the cost of model quality.
+
+vLLM already implements the mechanism: an Attention layer constructed with
+kv_sharing_target_layer_name gets no KVCacheSpec, the runner allocates nothing
+for it, and its cache tensor is aliased to the target's. The Qwen3.5 model code
+never passes the argument, so the capability is unreachable. This patch wires it
+to VLLM_QWEN_KV_SHARE:
+
+  group:N   consecutive full_attention layers grouped N at a time, the first of
+            each group owns the cache. Target is always nearby.
+  suffix:K  the first K full_attention layers own a cache, every later one reads
+            the K-th. You Only Cache Once layout; the only one that
+            --kv-sharing-fast-prefill can use, since that flag requires the
+            sharing layers to form a suffix.
+
+Unset (the default) is stock behaviour and touches nothing.
+
+On Qwen3.8-27B (64 layers, full_attention every 4th, 16 owners at 64 KiB/token
+fp16) group:2 gives 8 owners and group:4 gives 4 owners, which is DeepSeek
+V4.1-Flash's owner count.
+
+These layers were NOT trained to share. The knob exists so the quality cost can
+be measured before anyone spends a fine-tune on it -- see bench/kv_share_sweep.py
+and docs/kv-sharing.md. Do not ship a sharing layout on the strength of a boot
+log; it will boot happily and answer badly.
+
+VLLM_QWEN_KV_SHARE is registered in envs.py so it takes part in the
+torch.compile cache key. It changes which layers own a KV cache and therefore
+the compiled graph; without registration a sweep would silently replay the
+previous setting's graph.
+
+Depends on patches/marlin-int8-layer-select.patch for the envs.py context
+(same file, adjacent hunks). Apply the series in glob order, as the README and
+Dockerfile do:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/qwen3_5-kv-cache-sharing.patch
+
+Validated against vLLM 0.28.0. Reapply after upgrades.
+
+--- a/envs.py
++++ b/envs.py
+@@ -186,6 +186,11 @@ if TYPE_CHECKING:
+     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+     VLLM_MARLIN_INT8_INCLUDE_RE: str = ""
+     VLLM_MARLIN_INT8_EXCLUDE_RE: str = "lm_head|mtp"
++    # syv patch: cross-layer KV cache sharing for the Qwen3.5 full_attention
++    # layers. Registered here so the layout takes part in the torch.compile
++    # cache key -- it changes which layers own a KV cache, and therefore the
++    # compiled graph. "" disables. See patches/qwen3_5-kv-cache-sharing.patch.
++    VLLM_QWEN_KV_SHARE: str = ""
+     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
+     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
+     VLLM_HUMMING_USE_F16_ACCUM: bool = False
+@@ -1524,6 +1529,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     "VLLM_MARLIN_INT8_EXCLUDE_RE": lambda: os.environ.get(
+         "VLLM_MARLIN_INT8_EXCLUDE_RE", "lm_head|mtp"
+     ),
++    # syv patch: Qwen3.5 cross-layer KV cache sharing layout ("group:N" /
++    # "suffix:K"); part of the compile cache key, see the note above.
++    "VLLM_QWEN_KV_SHARE": lambda: os.environ.get("VLLM_QWEN_KV_SHARE", ""),
+     # The online quantization dtype for humming kernel
+     "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
+         os.environ.get("VLLM_HUMMING_ONLINE_QUANT_CONFIG", None)
+--- a/model_executor/models/qwen3_next.py
++++ b/model_executor/models/qwen3_next.py
+@@ -8,6 +8,7 @@ from itertools import islice
+ import torch
+ from torch import nn
+ 
++from vllm import envs
+ from vllm._aiter_ops import rocm_aiter_ops
+ from vllm.compilation.decorators import support_torch_compile
+ from vllm.config import CacheConfig, ModelConfig, VllmConfig
+@@ -224,6 +225,84 @@ class Qwen3NextSparseMoeBlock(nn.Module):
+         return final_hidden_states.view(orig_shape)
+ 
+ 
++# syv patch: cross-layer KV cache sharing for the full_attention layers.
++#
++# vLLM supports this natively -- an Attention layer built with
++# kv_sharing_target_layer_name gets no KVCacheSpec of its own, so the runner
++# allocates nothing for it and aliases its cache tensor to the target's
++# (gpu_model_runner.py, "The layer doesn't need its own KV cache"). The Qwen3.5
++# model code simply never passes the argument. VLLM_QWEN_KV_SHARE does:
++#
++#   group:N   consecutive full_attention layers are grouped N at a time and the
++#             FIRST layer of each group owns the cache. Uniform, and the target
++#             is always nearby, which is the gentler layout.
++#   suffix:K  the first K full_attention layers own their cache and every later
++#             one reads the K-th. This is the You Only Cache Once layout
++#             (arXiv 2405.05254) and the only one --kv-sharing-fast-prefill can
++#             use, because that flag needs the sharing layers to be a suffix.
++#
++# Qwen3.8-27B is 64 layers with full_attention every 4th, so 16 layers own a
++# cache of 2 * 4 heads * 256 head_dim * 2 bytes = 64 KiB/token at fp16.
++# group:2 halves that, group:4 quarters it.
++#
++# None of this is free: these layers were not trained to share, so the knob
++# exists to MEASURE the damage before anyone considers a fine-tune. See
++# bench/kv_share_sweep.py and docs/kv-sharing.md.
++def kv_sharing_target_layer(config, prefix: str) -> str | None:
++    spec = envs.VLLM_QWEN_KV_SHARE
++    if not spec:
++        return None
++    layer_types = getattr(config, "layer_types", None)
++    if not layer_types:
++        return None
++    full = [i for i, t in enumerate(layer_types) if t == "full_attention"]
++    idx = extract_layer_index(prefix)
++    if idx not in full:
++        return None
++    pos = full.index(idx)
++
++    mode, _, arg = spec.partition(":")
++    if mode == "group":
++        n = int(arg)
++        if n < 2:
++            raise ValueError(f"VLLM_QWEN_KV_SHARE=group:N needs N >= 2, got {n!r}")
++        owner = full[pos - (pos % n)]
++    elif mode == "suffix":
++        k = int(arg)
++        if not 1 <= k < len(full):
++            raise ValueError(
++                f"VLLM_QWEN_KV_SHARE=suffix:K needs 1 <= K < {len(full)}, got {k!r}"
++            )
++        if pos < k:
++            return None
++        owner = full[k - 1]
++    else:
++        raise ValueError(
++            f"VLLM_QWEN_KV_SHARE must be 'group:N' or 'suffix:K', got {spec!r}"
++        )
++    if owner == idx:
++        return None
++
++    # prefix is "<...>.layers.<idx>.self_attn"; the Attention module below is
++    # registered one level deeper, at "<...>.self_attn.attn". vLLM validates
++    # that the target comes BEFORE this layer and is the same attn_type, so a
++    # wrong name here fails at load rather than silently reading garbage.
++    head, sep, tail = prefix.rpartition(f"layers.{idx}")
++    if not sep:
++        return None
++    target = f"{head}layers.{owner}{tail}.attn"
++    owners = -(-len(full) // int(arg)) if mode == "group" else int(arg)
++    logger.info_once(
++        "Qwen3.5 KV sharing (%s): %d of %d full_attention layers own a cache, "
++        "global KV cache is %.2fx smaller",
++        spec,
++        owners,
++        len(full),
++        len(full) / owners,
++    )
++    return target
++
++
+ class Qwen3NextAttention(nn.Module):
+     def __init__(
+         self,
+@@ -304,6 +383,7 @@ class Qwen3NextAttention(nn.Module):
+             quant_config=quant_config,
+             prefix=f"{prefix}.attn",
+             attn_type=attn_type,
++            kv_sharing_target_layer_name=kv_sharing_target_layer(config, prefix),
+             **{
+                 "layer_idx": extract_layer_index(prefix),
+                 "dual_chunk_attention_config": self.dual_chunk_attention_config,
