@@ -139,6 +139,27 @@ Two patches make that work, and neither changes anything at bf16:
   split KV for a multi-query verify at all (`use_3d` is off whenever `max_seqlen_q > 1`, and
   every DFlash2 step is a verify). Per attention layer at 128k, 8 query tokens: 1.3 ms for this
   kernel against 7.4 ms for vLLM's unified attention and 10.1 ms for FA2.
+- **[triton-spec-attn-fp8-kv.patch](../patches/triton-spec-attn-fp8-kv.patch)** (sm89 and up) — the
+  same split-KV verify kernel reads vLLM's per-tensor fp8 cache (`--kv-cache-dtype fp8`), so the
+  fp8 pool can run with `TRITON_ATTN` on both sides and keep FULL CUDA graphs: on a 4090 at 120k,
+  DFlash2 fp8 decodes 108.7 / 88.6 / 81.0 tok/s at 24k / 49k / 88k tokens against 71.4 / 50.9 /
+  35.4 with vLLM's unified attention on the same route, and 84.4 / 81.7 / 83.5 for FlashInfer with
+  PIECEWISE (issue #87). The route is `SPEC=dflash2 CTX=fast` with
+  the exact launch line, verbatim (the `"attention_backend":"TRITON_ATTN"` inside the speculative
+  config is the part that is easy to drop, and dropping it silently costs the FULL graphs):
+
+  ```
+  SPEC=dflash2 CTX=fast EXTRA_ARGS="--attention-backend TRITON_ATTN --kv-cache-dtype fp8 --speculative-config '{\"method\":\"dflash\",\"model\":\"/app/models/Qwen3.8-27B-DFlash2-W4A16\",\"num_speculative_tokens\":7,\"draft_sample_method\":\"probabilistic\",\"attention_backend\":\"TRITON_ATTN\"}'" bash single-user/start_qwen.sh
+  ```
+
+  Measured on both a WSL2 4090 (Docker Desktop) and a native one (Ubuntu 24.04, driver 580.159, this
+  image): on native, prose prompts of ~24k / ~50k / ~89k tokens decode 100.6 / 96.0 / 87.4 tok/s with
+  this patch against 68.3 / 49.8 / 34.6 with vLLM's unified attention (median of 3, greedy, 256 out,
+  fresh prefill, `MAX_LEN=120000 PREFIX_CACHE=1 MAX_SEQS=4`), prefill unchanged by the patch on either
+  box (2.4k / 2.0k / 1.6k tok/s native). Not for the 3090: Triton has no fp8 conversion on sm86.
+  `INT8_ACT=int8` on the fp8 route is slow with or without this patch (a Marlin variant choice,
+  tracked separately): do not stack the two until the memory-pressure question behind it is
+  understood.
 
 ### What it is actually good for
 

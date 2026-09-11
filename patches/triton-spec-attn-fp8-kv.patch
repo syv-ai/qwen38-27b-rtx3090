@@ -1,0 +1,287 @@
+Let the split-KV verify attention read vLLM's per-tensor fp8 KV cache (`--kv-cache-dtype fp8`,
+sm89 and up), and hook it into the Triton backend beside the int8 per-token-head path.
+
+Why: on a 4090, `--attention-backend TRITON_ATTN --kv-cache-dtype fp8` with the drafter on
+Triton too (`--speculative-config '{..., "attention_backend": "TRITON_ATTN"}'`) is the only
+0.28 configuration that keeps FULL CUDA graphs with speculative decoding on the fp8 pool
+(FlashInfer's spec-decode support is single-token decode only, so it drops to PIECEWISE). But
+vLLM's unified Triton attention will not split the KV sequence for a multi-token verify, so
+that route decays with context: DFlash2 fp8 at 120k, greedy, fresh prefill, 256 out, median
+of 3 on the 4090 went 71.4 / 50.9 / 35.4 tok/s at 24k / 49k / 88k tokens against 84.4 /
+81.7 / 83.5 for stock fp8 FlashInfer with PIECEWISE (issue #87). The split-KV kernel here
+already holds bf16 flat with depth (113 tok/s at 24k and 49k on the same card, production);
+this patch gives it the fp8 cache.
+
+What changes:
+
+1. v1/attention/ops/spec_decode_attn.py gains an FP8 path beside QUANT. The Triton backend's
+   per-tensor fp8 cache is [num_blocks, block_size, Hkv, D] float8_e4m3fn with one float32
+   scale per layer tensor (layer._k_scale / layer._v_scale). fp8 e4m3 to bf16 is exact (3
+   mantissa bits into 8), and the scalar scales fold in after each dot the way the int8
+   per-token scales do, so the only new rounding is the bf16 dot the kernel already does:
+       s   = (q . k_fp8->bf16) * k_scale
+       acc = (p . v_fp8->bf16) * v_scale
+   The descales arrive as one-element tensors and are loaded once per program. vLLM also
+   quantizes the QUERY to fp8 on this cache path (layer._q_scale), so the kernel takes the
+   query's descale too and undoes it once at load; the gate's first version excluded that
+   case and the server ran the stock kernel (issue 87, the null row on 2026-09-09).
+
+2. v1/attention/backends/triton_attn.py routes FP8_PER_TENSOR caches (bf16 query, so no
+   q_descale) through the same gate as int8, passing the layer's scalar scales; one log line
+   per layer marks the path engaged. flash_attn.py's _spec_attn_run carries the descales.
+
+Measured (bench/test_spec_decode_fp8.py, 4090, 13 shapes to 90k tokens, q 1-64, plus six
+shapes with the fp8 query): worst max|fp8 kernel - fp32 reference on the dequantized cache| =
+0.0084, below the bf16 kernel's error on the same values in every row. Per attention layer, batch 1, us: kv 90k q 8, fp8 628 /
+bf16 615 / FA2 5057; kv 25k q 16, fp8 378 / bf16 397 / FA2 1431. A deliberately wrong key
+descale turns all 13 rows red. Server, DFlash2 fp8 at 120k on the 4090 (greedy, 256 out, fresh prefill, median of 3, 24k /
+49k / 88k tokens): the Triton route with this kernel decodes 108.7 / 88.6 / 81.0 tok/s with
+FULL graphs, against 71.4 / 50.9 / 35.4 without it and 84.4 / 81.7 / 83.5 for stock fp8
+FlashInfer (PIECEWISE); production bf16 on the same kernel does 113 / 114 at 24k / 49k.
+
+Order: applies on top of spec-decode-attn.patch (with the issue #86 int64 cast), spec-decode-int8-kv.patch
+and spec-decode-scratch-within-budget.patch (glob order does that; this name sorts after them).
+Not for sm86: Triton has no native fp8 conversion there and the backend already refuses fp8
+below SM89, so the 3090 keeps the int8 route. Apply from the repo root:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/triton-spec-attn-fp8-kv.patch
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -56,7 +56,7 @@
+ def _spec_attn_partial(
+     q_ptr, k_ptr, v_ptr, bt_ptr, seqused_ptr, cu_q_ptr,
+     part_o_ptr, part_m_ptr, part_l_ptr,
+-    ks_ptr, vs_ptr,
++    ks_ptr, vs_ptr, kd_ptr, vd_ptr, qd_ptr,
+     scale,
+     stride_qt, stride_qh,
+     stride_kb, stride_ks, stride_kh,
+@@ -66,7 +66,7 @@
+     stride_vsb, stride_vss, stride_vsh,
+     G: tl.constexpr, Hq: tl.constexpr, QMAX: tl.constexpr, D: tl.constexpr, BLOCK_SIZE: tl.constexpr,
+     BLOCK_M: tl.constexpr, TILE: tl.constexpr, NSEG: tl.constexpr, QT: tl.constexpr,
+-    NTILE: tl.constexpr, QUANT: tl.constexpr,
++    NTILE: tl.constexpr, QUANT: tl.constexpr, FP8: tl.constexpr, Q_FP8: tl.constexpr,
+ ):
+     pid = tl.program_id(0)
+     req = pid // NTILE
+@@ -87,6 +87,9 @@
+     d = tl.arange(0, D)
+     q_ptrs = q_ptr + (q_start + ri)[:, None] * stride_qt + (kvh * G + rg)[:, None] * stride_qh + d[None, :]
+     q = tl.load(q_ptrs, mask=row_ok[:, None], other=0.0)
++    if Q_FP8:
++        # the fp8 cache path quantizes the query too (layer._q_scale); undo it once here
++        q = q.to(tl.float32) * tl.load(qd_ptr)
+ 
+     # this segment's key range
+     tiles_total = (kv_len + TILE - 1) // TILE
+@@ -98,6 +101,12 @@
+     l_i = tl.zeros([BLOCK_M], tl.float32)
+     acc = tl.zeros([BLOCK_M, D], tl.float32)
+     qs = (q * scale).to(tl.bfloat16)
++    if FP8:
++        # fp8 e4m3 data with one f32 scale per layer tensor (vLLM's `fp8` cache): fp8 -> bf16 is exact
++        # (3 mantissa bits into 8), and the scalar scales fold in after each dot, the way the int8
++        # per-token scales do, so the only new rounding is the bf16 dot itself.
++        k_dsc = tl.load(kd_ptr)
++        v_dsc = tl.load(vd_ptr)
+ 
+     for t in range(t0, t1):
+         pos = t * TILE + tl.arange(0, TILE)
+@@ -120,6 +129,10 @@
+             v_sc = tl.load(vs_ptr + blk * stride_vsb + slot * stride_vss + kvh * stride_vsh,
+                            mask=k_ok, other=0.0)
+             s = tl.dot(qs, tl.trans(k)).to(tl.float32) * k_sc[None, :]
++        elif FP8:
++            k = k.to(tl.bfloat16)
++            v = v.to(tl.bfloat16)
++            s = tl.dot(qs, tl.trans(k)).to(tl.float32) * k_dsc
+         else:
+             s = tl.dot(qs, tl.trans(k)).to(tl.float32)            # [BLOCK_M, TILE]
+         allowed = k_ok[None, :] & (pos[None, :] <= q_pos[:, None]) & row_ok[:, None]
+@@ -131,6 +144,8 @@
+         l_i = l_i * alpha + tl.sum(p, 1)
+         if QUANT:
+             acc = acc * alpha[:, None] + tl.dot((p * v_sc[None, :]).to(tl.bfloat16), v).to(tl.float32)
++        elif FP8:
++            acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v).to(tl.float32) * v_dsc
+         else:
+             acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
+         m_i = m_new
+@@ -207,23 +222,43 @@
+         return block_m, qt, triton.cdiv(q_len, qt), 8 if block_m >= 128 else 4
+ 
+     def run(self, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, scale,
+-            num_reqs, max_query_len, k_scale_cache=None, v_scale_cache=None):
++            num_reqs, max_query_len, k_scale_cache=None, v_scale_cache=None,
++            k_descale=None, v_descale=None, q_descale=None):
+         """key/value_cache: [num_blocks, block_size, Hkv, D] bf16, or [.., D + pad] int8
+-        with k/v_scale_cache [num_blocks, block_size, Hkv] float32 (per-token-head int8)."""
++        with k/v_scale_cache [num_blocks, block_size, Hkv] float32 (per-token-head int8), or
++        [.., D] fp8 e4m3 with k/v_descale one-element float32 tensors (vLLM's per-tensor `fp8`)."""
+         Hq, D = q.shape[1], q.shape[2]
+         Hkv = key_cache.shape[2]
+         G = Hq // Hkv
+         quant = k_scale_cache is not None
++        fp8 = key_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
++        q_fp8 = q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
++        if fp8:
++            assert not quant and k_descale is not None and v_descale is not None, "fp8 cache needs per-tensor descales"
++        if q_fp8:
++            assert q_descale is not None, "fp8 query needs its descale"
+         assert max_query_len <= self.qmax, "too many query tokens per request for this kernel"
+         assert num_reqs <= self.max_num_reqs
+         # shared memory on sm86 is 99 KB: q tile + one K and one V tile + scores must fit
+         block_m, qt, ntile, warps = self._plan(max_query_len, G, D)
+         tile = 64 if (block_m <= 32 or D <= 128) else 32
++        if os.environ.get("VLLM_SPEC_ATTN_DEBUG"):
++            self._dbg_calls = getattr(self, "_dbg_calls", 0) + 1
++            if self._dbg_calls in (1, 2, 500, 2000):
++                import time as _t
++                torch.cuda.synchronize(); _t0 = _t.perf_counter()
++                print(f"syv spec-attn run#{self._dbg_calls}: q {q.dtype} {tuple(q.shape)} strides {q.stride()} contig={q.is_contiguous()} | "
++                      f"kc {key_cache.dtype} {tuple(key_cache.shape)} strides {key_cache.stride()} | out {out.dtype} strides {out.stride()} | "
++                      f"quant={quant} fp8={fp8} q_fp8={q_fp8} kd={None if k_descale is None else float(k_descale.reshape(-1)[0])} "
++                      f"vd={None if v_descale is None else float(v_descale.reshape(-1)[0])} qd={None if q_descale is None else float(q_descale.reshape(-1)[0])} | "
++                      f"num_reqs={num_reqs} qlen={max_query_len} plan block_m={block_m} qt={qt} ntile={ntile} warps={warps} tile={tile} nseg={self.nseg} "
++                      f"seqused={seqused_k[:num_reqs].tolist()}", flush=True)
++                self._dbg_t0 = _t0
+         grid = (num_reqs * ntile, Hkv, self.nseg)
+         _spec_attn_partial[grid](
+             q, key_cache, value_cache, block_table, seqused_k, cu_seqlens_q,
+             self.part_o, self.part_m, self.part_l,
+-            k_scale_cache, v_scale_cache,
++            k_scale_cache, v_scale_cache, k_descale, v_descale, q_descale,
+             scale,
+             q.stride(0), q.stride(1),
+             key_cache.stride(0), key_cache.stride(1), key_cache.stride(2),
+@@ -232,7 +267,7 @@
+             *(k_scale_cache.stride() if quant else (0, 0, 0)),
+             *(v_scale_cache.stride() if quant else (0, 0, 0)),
+             G=G, Hq=Hq, QMAX=self.qmax, D=D, BLOCK_SIZE=key_cache.shape[1], BLOCK_M=block_m,
+-            TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,
++            TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant, FP8=fp8, Q_FP8=q_fp8,
+             num_warps=warps, num_stages=1,
+         )
+         _spec_attn_combine[(num_reqs, Hq, max_query_len)](
+@@ -240,4 +275,8 @@
+             out.stride(0), out.stride(1),
+             Hq=Hq, QMAX=self.qmax, D=D, NSEG=self.nseg, num_warps=4,
+         )
++        if os.environ.get("VLLM_SPEC_ATTN_DEBUG") and getattr(self, "_dbg_t0", None) is not None:
++            import time as _t
++            torch.cuda.synchronize(); print(f"syv spec-attn run#{self._dbg_calls}: kernel pair took {(_t.perf_counter() - self._dbg_t0) * 1e6:.0f} us", flush=True)
++            self._dbg_t0 = None
+         return out
+--- a/v1/attention/backends/triton_attn.py
++++ b/v1/attention/backends/triton_attn.py
+@@ -5,6 +5,7 @@
+ from dataclasses import dataclass, replace
+ from typing import ClassVar
+ 
++import os
+ import torch
+ 
+ import vllm.envs as envs
+@@ -45,6 +46,7 @@
+     _spec_attn_enabled,
+     _spec_attn_qmax,
+     _spec_attn_run,
++    _spec_attn_run_fp8,
+ )
+ from vllm.v1.kv_cache_interface import (
+     AttentionSpec,
+@@ -915,10 +917,31 @@
+         # int8 per-token-head only: the kernel folds the per-(token, head) scales in after
+         # each dot, which is exact because they are constant along the head dim. The
+         # drafter's own sliding-window layers are excluded by the window test below.
++        # fp8 per-tensor (vLLM's `fp8` cache, sm89+): the same kernel reads fp8 e4m3 and folds the
++        # layer's scalar k/v scales in after each dot; it is what keeps FULL graphs and the split
++        # verify together on the 4090 (issue 87: stock Triton verify decays 2.3x by 90K).
++        spec_fp8 = (
++            self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
++            and key_cache.dtype == self.fp8_dtype
++        )
++        if os.environ.get("VLLM_SPEC_ATTN_DEBUG") and max_seqlen_q > 1 and not getattr(self, "_spec_dbg_logged", False):
++            self._spec_dbg_logged = True
++            logger.info(
++                "syv spec-attn gate: enabled=%s quant_mode=%s cache_dtype=%s fp8_dtype=%s q_descale=%s spec_fp8=%s "
++                "max_seqlen_q=%d qmax=%d causal=%s window=%s softcap=%s alibi=%s sinks=%s lookback=%s mm_prefix=%s rswa=%s out_scale=%s",
++                _spec_attn_enabled(), self._kv_quant_mode, key_cache.dtype, self.fp8_dtype, q_descale is not None, spec_fp8,
++                max_seqlen_q, _spec_attn_qmax(self.num_heads // self.num_kv_heads), attn_metadata.causal, self.sliding_window,
++                self.logits_soft_cap, self.alibi_slopes is not None, self.sinks is not None, self.chunk_lookback,
++                mm_prefix_range_tensor is not None, attn_metadata.rswa_prefix_lens is not None, output_scale is not None)
+         if (
+             _spec_attn_enabled()
+-            and self._kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD
+-            and k_scale_cache is not None
++            and (
++                spec_fp8
++                or (
++                    k_scale_cache is not None
++                    and self._kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD
++                )
++            )
+             and 1 < max_seqlen_q <= _spec_attn_qmax(self.num_heads // self.num_kv_heads)
+             and attn_metadata.causal
+             and (self.sliding_window is None or self.sliding_window == (-1, -1))
+@@ -930,6 +953,25 @@
+             and attn_metadata.rswa_prefix_lens is None
+             and output_scale is None
+         ):
++            if spec_fp8 and not getattr(self, "_spec_fp8_logged", False):
++                self._spec_fp8_logged = True
++                logger.info("syv spec-attn: split-KV verify on the fp8 per-tensor cache engaged (max_seqlen_q=%d)", max_seqlen_q)
++            if spec_fp8:
++                _spec_attn_run_fp8(
++                    self,
++                    query[:num_actual_tokens],
++                    key_cache,
++                    value_cache,
++                    output[:num_actual_tokens],
++                    cu_seqlens_q,
++                    seqused_k,
++                    block_table,
++                    max_seqlen_q,
++                    layer._k_scale,
++                    layer._v_scale,
++                    q_descale=q_descale,
++                )
++                return output
+             _spec_attn_run(
+                 self,
+                 query[:num_actual_tokens],
+--- a/v1/attention/backends/flash_attn.py
++++ b/v1/attention/backends/flash_attn.py
+@@ -1925,3 +1925,31 @@
+     att.run(q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, impl.scale,
+             cu_seqlens_q.shape[0] - 1, max_seqlen_q,
+             k_scale_cache=k_scale_cache, v_scale_cache=v_scale_cache)
++
++
++def _spec_attn_run_fp8(impl, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, max_seqlen_q,
++                       k_descale, v_descale, q_descale=None):
++    """The split-KV verify on vLLM's per-tensor fp8 cache (sm89+): same kernel and buffers as
++    _spec_attn_run, with the layer's scalar k/v scales and, when vLLM quantized the query too,
++    its q scale. A separate entry point so the int8 helper above stays byte-identical
++    (verify.sh detects patches by their lines)."""
++    from vllm.v1.attention.ops.spec_decode_attn import SpecDecodeAttention
++
++    key = (impl.num_heads, impl.head_size, q.device)
++    att = _SPEC_ATTN.get(key)
++    if att is None:
++        from vllm.config import get_current_vllm_config
++
++        try:
++            max_reqs = get_current_vllm_config().scheduler_config.max_num_seqs
++        except Exception:
++            max_reqs = 256
++        max_reqs = max(max_reqs, cu_seqlens_q.shape[0] - 1)
++        att = SpecDecodeAttention(
++            max_reqs, impl.num_heads, impl.head_size, q.device,
++            qmax=_spec_attn_qmax(impl.num_heads // impl.num_kv_heads),
++        )
++        _SPEC_ATTN[key] = att
++    att.run(q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, impl.scale,
++            cu_seqlens_q.shape[0] - 1, max_seqlen_q,
++            k_descale=k_descale, v_descale=v_descale, q_descale=q_descale)
