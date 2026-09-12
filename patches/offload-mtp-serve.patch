@@ -1,0 +1,153 @@
+OffloadingConnector under MTP/EAGLE: serve stored hits instead of vetoing the
+whole request, and read the load boundary from the computed offset.
+
+Backports three merged upstream fixes onto the 0.28.0 tree (all land after the
+0.28.0 wheel, so this image has neither):
+
+  vllm-project/vllm#52771 (merged 2026-09-07) -- OffloadingConnector: stop
+    zeroing offload hits under MTP/EAGLE spec decode. Three changes: the
+    all-groups fallback no longer marks every KV group as a drafter group (it
+    logs instead); the volatile-tail store exclusion is lifted once a request
+    is finished (the final chunk is then stored); the lookup query is widened
+    for every eagle group, not only sliding-window ones.
+  vllm-project/vllm#52807 (merged 2026-09-03) -- do not let a recurrent
+    group's unhashed block truncate the load boundary: scan from the computed
+    boundary, not 0, so a sparse (Mamba / SWA) group's legitimate unhashed
+    blocks below it are not mistaken for the load start.
+
+The confirmed symptom (upstream #52735, reproduced there on 3090 Ti, H100 NVL
+on stock v0.27.1, and GB200): with a hybrid-GDN model under MTP the CPU offload
+tier stores but never serves. The full-attention group hits every chunk while
+the Mamba groups return 0 and veto the whole request, so 41 GB is written and
+0 bytes ever read back. This fork's own offload-dflash-eagle-groups.patch
+narrows the fallback for the dflash path only; under MTP every group is still
+flagged, which is exactly the reporter's boot line in syv-ai#95.
+
+Applies on top of offload-dflash-eagle-groups.patch (the hunks were generated
+against the tree with that patch already applied).
+
+Third fix (upstream #54288, merged 2026-09-06, also absent from 0.29.0): a finished
+request offloaded up to num_tokens, but the final sampled token has no KV of its own (no
+forward pass covers its slot; under spec decode it holds a rejected draft), so a block
+ending there was stored under a hash of legitimate token ids and a later request replaying
+those tokens loaded the unwritten slot. Clamp the finished watermark to num_tokens - 1
+(never below the prompt). Reachable only with offload_prompt_only=false; the default
+clamps to the prompt first. Upstream wrote #52771 against a tree that already had this
+fix, and its EAGLE trailing-block tests fail without it.
+
+--- generated hunks below ---
+--- a/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
++++ b/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
+@@ -240,7 +240,19 @@
+                     if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                 }
+         if use_eagle and not eagle_groups:
+-            eagle_groups = set(range(len(kv_cache_config.kv_cache_groups)))
++            # (syv, from upstream #52771) No group is annotated as holding drafter
++            # layers: shared-group MTP (the Qwen3.5-style drafter is a decoder layer
++            # merged into the target's full-attention group). Marking EVERY group as a
++            # drafter made the volatile-tail pop apply to all groups, which zeroes the
++            # whole request's offload hit whenever any group's servable window is a
++            # single chunk (upstream #52735): the tier stored but never served. A
++            # drafter chunk served one step stale can only lower acceptance; the
++            # target verifies every draft. Fail toward serving.
++            logger.info_once(
++                "KV offloading: speculative decoding is enabled but no KV-cache "
++                "group is annotated as a drafter group; treating all groups as "
++                "non-draft for offloading."
++            )
+ 
+         if eagle_groups:
+             logger.info(
+@@ -442,7 +454,9 @@
+         """
+         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
+         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
+-        if group_config.is_eagle_group and is_decoding:
++        # Finished requests have no pending speculation, so the final chunk is stable
++        # and storable (upstream #52771).
++        if group_config.is_eagle_group and is_decoding and not self.req.is_finished():
+             num_chunks = max(0, num_chunks - 1)
+         num_allocated_chunks = (
+             len(group_state.block_ids) // self.config.blocks_per_chunk
+@@ -799,9 +813,12 @@
+                 )
+ 
+                 # For eagle groups, query one extra chunk that will be popped.
+-                # We only need to increase the query size for sliding window groups.
++                # Widening applies to every group type (upstream #52771): without it
++                # the pop below shrinks max_hit_size_tokens past what was queried,
++                # which can push the confirmed boundary under a coarser sibling
++                # group's chunk granularity and zero the whole request's hit.
+                 query_max = max_hit_size_tokens
+-                if is_eagle_unverified and sliding_window_size_in_chunks is not None:
++                if is_eagle_unverified:
+                     query_max = min(
+                         max_hit_size_tokens + tokens_per_chunk,
+                         len(offload_keys) * tokens_per_chunk,
+@@ -1066,18 +1083,20 @@
+             num_gpu_blocks = cdiv(num_cached_tokens, tokens_per_block)
+ 
+             assert len(group_blocks) >= num_gpu_blocks
+-            num_locally_computed_gpu_blocks = num_gpu_blocks
+-            # Skip null placeholder blocks (used for sliding window or mamba padding).
+-            for i, block in enumerate(group_blocks[:num_gpu_blocks]):
++            # ``load_start_gpu_block_idx``: the index in ``group_blocks`` where the
++            # load region begins, a slice bound, not a count of computed blocks.
++            # Scan from the computed boundary, not 0: sparse groups (Mamba, SWA)
++            # legitimately hold non-null unhashed blocks below it (upstream #52807).
++            first_fresh_gpu_block_idx = cdiv(num_locally_computed_tokens, tokens_per_block)
++            load_start_gpu_block_idx = num_gpu_blocks
++            for i in range(first_fresh_gpu_block_idx, num_gpu_blocks):
++                block = group_blocks[i]
+                 if not block.is_null and block.block_hash is None:
+-                    num_locally_computed_gpu_blocks = i
++                    load_start_gpu_block_idx = i
+                     break
+ 
+-            assert (
+-                num_locally_computed_tokens
+-                <= num_locally_computed_gpu_blocks * tokens_per_block
+-            )
+-            num_pending_gpu_blocks = num_gpu_blocks - num_locally_computed_gpu_blocks
++            assert num_locally_computed_tokens % tokens_per_block == 0
++            num_pending_gpu_blocks = num_gpu_blocks - load_start_gpu_block_idx
+ 
+             if group_config.sliding_window_size_in_chunks is not None:
+                 assert (
+@@ -1090,7 +1109,7 @@
+             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
+             if num_pending_gpu_blocks:
+                 start_chunk_idx = (
+-                    num_locally_computed_gpu_blocks // self.config.blocks_per_chunk
++                    load_start_gpu_block_idx // self.config.blocks_per_chunk
+                 )
+                 end_chunk_idx = num_chunks - (partial_tail_boundary is not None)
+                 assert len(offload_keys) >= end_chunk_idx
+@@ -1104,12 +1123,10 @@
+ 
+             dst_block_ids.extend(
+                 block.block_id
+-                for block in group_blocks[
+-                    num_locally_computed_gpu_blocks:num_gpu_blocks
+-                ]
++                for block in group_blocks[load_start_gpu_block_idx:num_gpu_blocks]
+             )
+             group_sizes.append(num_pending_gpu_blocks)
+-            block_indices.append(num_locally_computed_gpu_blocks)
++            block_indices.append(load_start_gpu_block_idx)
+ 
+             # Skip prefix-hit chunks for block-level policy; for
+             # request-level, next_stored_chunk_idx stays at 0 so all
+@@ -1305,7 +1322,10 @@
+             if req.status is RequestStatus.FINISHED_ABORTED:
+                 num_tokens_after_batch = req.num_computed_tokens
+             elif req.is_finished():
+-                num_tokens_after_batch = req.num_tokens
++                # Clamp to the GPU prefix cache commit point: the final sampled token
++                # has no KV of its own (under spec decode its slot holds a rejected
++                # draft), so a block ending there must not be stored (vllm #54288).
++                num_tokens_after_batch = max(req.num_prompt_tokens, req.num_tokens - 1)
+             else:
+                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
