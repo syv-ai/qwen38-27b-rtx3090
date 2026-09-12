@@ -1,0 +1,62 @@
+Mamba "align" prefix caching: retire state blocks across null gaps and stop
+rescanning the retired prefix (backport of upstream vllm#55450, merged
+2026-09-11, not in 0.29.0).
+In align mode a long prefill leaves null gaps between the state snapshots
+that await retirement. The base block remover walks backward and stops at
+the first null block, so every state older than the gap stays allocated
+until the request ends. Upstream measured 71 retained state blocks per
+Mamba group where 8 or 9 is the bound (480k-token prefill, MTP), and the
+same 71 reproduces on this tree with upstream test
+test_mamba_retirement_bounds_prefill_states. MambaManager now overrides the
+remover for align mode: skip nulls instead of stopping, and remember how
+far retirement has reached so the prefix is not rescanned. States are
+returned at request end either way; the cost is peak pool pressure during
+long prefills, not a permanent leak.
+Applies on top of mamba-align-checkpoint-order.patch.
+--- generated hunks below ---
+--- a/v1/core/single_type_kv_cache_manager.py
++++ b/v1/core/single_type_kv_cache_manager.py
+@@ -1317,6 +1317,7 @@
+             # Mapping from request ID to the index of the block
+             # allocated in the previous step
+             self.last_state_block_idx: dict[str, int] = {}
++            self._num_retired_blocks: dict[str, int] = {}
+             # The set of the requests that have been allocated blocks
+             self._allocated_block_reqs: set[str] = set()
+             # Requests that registered their own last-prompt-boundary partial
+@@ -1469,6 +1470,27 @@
+ 
+         return mask
+ 
++    def _remove_blocks_in_range(
++        self, request_id: str, first_block: int, last_block: int
++    ) -> None:
++        if self.mamba_cache_mode != "align":
++            return super()._remove_blocks_in_range(request_id, first_block, last_block)
++        blocks = self.req_to_blocks.get(request_id, [])
++        first_block = max(first_block, self._num_retired_blocks.get(request_id, 0))
++        last_block = min(last_block, len(blocks))
++        if first_block >= last_block:
++            return
++        freed: list[KVCacheBlock] = []
++        # Mamba prefill leaves null gaps between states awaiting retirement.
++        for i in range(last_block - 1, first_block - 1, -1):
++            if blocks[i].is_null:
++                continue
++            freed.append(blocks[i])
++            blocks[i] = self._null_block
++        if freed:
++            self.block_pool.free_blocks(freed)
++        self._num_retired_blocks[request_id] = last_block
++
+     def remove_skipped_blocks(
+         self,
+         request_id: str,
+@@ -1772,6 +1794,7 @@
+         if self.mamba_cache_mode == "align":
+             self._allocated_block_reqs.discard(request_id)
+             self.last_state_block_idx.pop(request_id, None)
++            self._num_retired_blocks.pop(request_id, None)
+             self._producer_partial_tail_reqs.pop(request_id, None)
+             # A hand-off whose request died in this same scheduling pass must
+             # not reach the connector: its unpin hook (free) has already run.
