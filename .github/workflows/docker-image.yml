@@ -16,14 +16,16 @@
 name: docker image
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.gitignore'
-  schedule:
-    - cron: '17 4 * * 1'
+  # Local builds only for now (no publishing): auto-builds disabled 2026-09-15.
+  # Re-enable push/schedule when ready to publish again.
+  # push:
+  #   branches: [main]
+  #   paths-ignore:
+  #     - '**.md'
+  #     - 'docs/**'
+  #     - '.gitignore'
+  # schedule:
+  #   - cron: '17 4 * * 1'
   workflow_dispatch:
 
 concurrency:
@@ -65,11 +67,18 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
 
+      # ghcr repository names must be lowercase; github.repository keeps the
+      # owner's case (e.g. TyroneNel/...), which buildx rejects on the
+      # cache refs (metadata tags are lowercased by the action itself).
+      - name: Lowercase repository for cache refs
+        id: repo_lc
+        run: echo "value=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=ghcr.io/syv-ai/hyperqwen:buildcache
-          cache-to: type=registry,ref=ghcr.io/syv-ai/hyperqwen:buildcache,mode=max
+          cache-from: type=registry,ref=${{ steps.repo_lc.outputs.value }}:buildcache
+          cache-to: type=registry,ref=${{ steps.repo_lc.outputs.value }}:buildcache,mode=max

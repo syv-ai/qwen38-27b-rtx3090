@@ -16,6 +16,13 @@ Matches exactly what vLLM's mtp drafter computes (with the mtp-draft-vocab patch
   python train_mtp.py --out runs/r1 [--epochs 2] [--lr 2e-5] [--depths 2] [--train-head]
                       [--tokens-per-step 32768] [--eval-only 1] [--init ckpt.safetensors]
 Writes <out>/mtp_bf16.safetensors (vLLM tensor names, bf16) + log.txt.
+
+Row identity + completion (F14): the effective draft-vocab IDs (custom
+--draft-ids or the model dir's) are bundled as <out>/draft_vocab_ids.json with
+every checkpoint so export_mtp.py can verify row identity instead of attaching
+whatever IDs the source dir carries; the train split is preflighted non-empty
+(val_frac can no longer reserve the whole corpus). Logged KL/top-1 are
+token-normalized (sums of per-row stats divided by contributing tokens).
 """
 import os, sys, json, math, time, random, argparse
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
@@ -239,7 +246,14 @@ seqs = [s for s in seqs if s["n"] >= 8 + DEPTHS]
 rng = random.Random(0)
 rng.shuffle(seqs)
 n_val = max(8, int(len(seqs) * args.val_frac))
+# F14: never reserve the whole corpus for validation — an empty train set
+# used to proceed to a training loop with no microbatch.
+if len(seqs) - n_val < 1:
+    n_val = max(0, len(seqs) - 1)
 val_seqs, train_seqs = seqs[:n_val], seqs[n_val:]
+if not train_seqs:
+    raise SystemExit(f"F14: refusing to train on an empty train split "
+                     f"({len(seqs)} eligible seqs, val_frac={args.val_frac})")
 log(f"{len(train_seqs)} train seqs / {len(val_seqs)} val seqs; train tokens {sum(s['n'] for s in train_seqs)}")
 
 
@@ -450,6 +464,20 @@ def save():
     if head_param is not None:
         out["mtp.draft_lm_head.weight"] = head_param.detach().to(torch.bfloat16).cpu()
     save_file(out, os.path.join(args.out, "mtp_bf16.safetensors"), metadata={"format": "pt"})
+    # F14 row identity: a custom --draft-ids list used to live only in the
+    # caller's shell history while export attached whatever IDs the source
+    # model dir happened to carry. Bundle the effective IDs (and their
+    # provenance) with every checkpoint so export can verify row identity.
+    _ids_path = os.path.join(args.out, "draft_vocab_ids.json")
+    _ids_src = args.draft_ids or (d + "mtp_draft_vocab_ids.pt")
+    if draft_ids is None:
+        json.dump({"vocab": "full", "ids": None, "source": None,
+                   "model_dir": d, "full_vocab_size": V},
+                  open(_ids_path, "w"), indent=1)
+    else:
+        json.dump({"vocab": "draft", "ids": sorted(set(draft_ids.tolist())),
+                   "source": _ids_src, "model_dir": d},
+                  open(_ids_path, "w"), indent=1)
 
 
 log("EVAL step 0", json.dumps(evaluate()))

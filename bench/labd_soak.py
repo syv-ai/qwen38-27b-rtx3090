@@ -34,6 +34,10 @@ What to look for, in order of how much a failure means:
 All four requests share one document, so this also exercises several requests resuming from
 the same cached prefix at once -- which is a likelier source of trouble than the lookup, and
 worth ruling in or out with PREFIX_CACHE=0 before blaming the drafter.
+
+Quality gate (F11): copy tasks are judged on correspondence to the source via
+bench/verbatim.py, not just round-to-round repeatability; any EMPTY, diverged,
+or corrupt answer exits 1 with RESULT FAIL.
 """
 
 import json
@@ -43,7 +47,23 @@ import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-KEY = open(os.path.expanduser("~/qwen-serving/api_key.txt")).read().strip()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from verbatim import classify as _classify
+except Exception:
+    _classify = None
+
+HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
+
+
+def _key(path):  # a key is optional; keyless servers ignore the header
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return ""
+
+
+KEY = os.environ.get("VLLM_API_KEY") or _key(os.path.join(REPO, "api_key.txt"))
 BASE = "http://127.0.0.1:18020"
 CORPUS = os.path.expanduser("~/bench/labd_corpus.txt")
 
@@ -68,13 +88,14 @@ TASKS = [
 
 
 def metrics():
+    # Sum over engines/label series; overwrite drops all but the last series.
     req = urllib.request.Request(BASE + "/metrics", headers={"Authorization": "Bearer " + KEY})
     d = {}
     for line in urllib.request.urlopen(req).read().decode().splitlines():
         for k in ("vllm:spec_decode_num_drafts_total",
                   "vllm:spec_decode_num_accepted_tokens_total"):
             if line.startswith(k + " ") or line.startswith(k + "{"):
-                d[k] = float(line.split()[-1])
+                d[k] = d.get(k, 0.0) + float(line.split()[-1])
     return (d.get("vllm:spec_decode_num_drafts_total", 0.0),
             d.get("vllm:spec_decode_num_accepted_tokens_total", 0.0))
 
@@ -122,6 +143,13 @@ while rnd < ROUNDS or time.time() < t_end:
                 bad += 1
             note += " same as alone" if o["text"] == alone["text"] else " != alone"
             soft += o["text"] != alone["text"]
+            # F11 correspondence: the copy task must reproduce the source, not
+            # just repeat round 1. Judge coverage against the document.
+            if _classify is not None and o["text"].strip():
+                flag, cov, why = _classify(o["text"], doc)
+                if flag != "ok":
+                    note += f" CORRUPT(cov={cov:.2f},{why})"
+                    bad += 1
         if not ok:
             bad += 1
         print(f"  round {rnd} {o['task']:8s} {o['tokens']:4d} tok {o['wall']:6.1f}s "
@@ -132,4 +160,8 @@ print(f"soak: {rnd} rounds x {CONC} requests, tokens/step={1 + (a1 - a0) / max(s
       f"{'OK' if not bad else str(bad) + ' PROBLEMS'}"
       + (f", {soft} round(s) differ from the batch-1 reference -- read the diff before"
          " calling it a bug" if soft else ""))
+if bad:
+    print("RESULT FAIL")
+else:
+    print("RESULT PASS")
 sys.exit(1 if bad else 0)

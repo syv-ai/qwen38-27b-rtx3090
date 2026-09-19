@@ -1,0 +1,70 @@
+# Fast CPU policy checks for PRs: shell syntax, Python compilation, patch
+# format, and the offline fixture suites. No GPU, no model, no server.
+# GPU qualification stays a separate release gate (see patch-integrity.yml).
+name: bench-policy
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: shell syntax
+        run: |
+          for f in bench/*.sh docker/*.sh single-user/*.sh batch/*.sh verify.sh patches/*.sh docker/entrypoint.sh; do
+            [ -f "$f" ] || continue
+            bash -n "$f" || exit 1
+          done
+      - name: python compilation
+        run: |
+          python3 -m compileall -q bench drafter prepare kvarn/files patches/_check_applied.py
+      - name: patch format (strict parse, unified diff only)
+        run: |
+          for p in patches/*.patch; do
+            case "$(basename "$p")" in
+              # Hand-maintained plain diffs (context + body drift): valid for
+              # GNU patch / verify.sh, fragile under git apply's parser.
+              vision-tower-cpu-offload.patch)
+                grep -q '^@@ ' "$p" || { echo "corrupt: $p"; exit 1; }
+                continue ;;
+            esac
+            git apply --numstat -- "$p" >/dev/null || { echo "corrupt: $p"; exit 1; }
+          done
+      - name: CPU fixtures
+        run: |
+          python3 bench/verbatim.py
+          python3 bench/test_fa_scratch_capacity.py
+      - name: offline failure-path mocks
+        run: |
+          python3 - <<'EOF'
+          import subprocess, sys
+          # metric multi-series summation must not drop series (last-wins bug)
+          src = open("bench/labd_bench.py").read()
+          assert "d.get(k, 0.0) + float" in src, "labd_bench metrics must sum series"
+          # every executable check ends in PASS/FAIL with a matching exit code
+          for f in ["bench/api_smoke.py", "bench/needle_test.py",
+                    "bench/test_spec_decode_attn.py", "bench/residue_sweep.py",
+                    "bench/bugb_sweep.py", "bench/quality_battery.py",
+                    "bench/labd_soak.py", "bench/labd_accept.py"]:
+              t = open(f).read()
+              assert "RESULT FAIL" in t and "sys.exit(" in t, f
+          # cohort workload pins thinking-off (protocol v2)
+          for f in ["bench/run_benchmarks.sh", "bench/prefill_ab.sh", "bench/real_rep.sh"]:
+              assert "chat-template-kwargs" in open(f).read(), f
+          # fail-closed must also catch all-failed runs (bench exits 0 on those)
+          for f in ["bench/run_benchmarks.sh", "bench/prefill_ab.sh", "bench/real_rep.sh"]:
+              assert "Successful requests" in open(f).read(), f
+          # proxy label must not pose as throughput
+          assert "cohort-latency-score" in open("bench/run_benchmarks.sh").read()
+          # headroom must not share the single profile with a mandatory key
+          c = open("docker-compose.yml").read()
+          assert "profiles: [headroom]" in c and "VLLM_API_KEY:?" not in c
+          # patch helper must refuse the workspace
+          assert 'GIT_ROOT" = "$HERE"' in open("patches/check_vllm_series.sh").read()
+          print("policy mocks: OK")
+          EOF

@@ -1,8 +1,12 @@
 """GPTQ-quantize lm_head to int4 (g128, sym) using captured final hidden states as
-calibration, and write a model-dir variant (hardlinked shards).
+calibration, and write a model-dir variant (copied shards).
 
   python gptq_lm_head.py <src_model_dir> <dst_dir> [--bits 4] [--calib-rows 400000] [--mse-clip]
 Also reports the KL(bf16 head || quantized head) on held-out hidden states for RTN vs GPTQ.
+
+Write safety (F04): variant artifacts are COPIED, never hardlinked.
+build_draft_vocab.py rewrites the extras shard in place; a hardlink would
+mutate the SOURCE model dir through the shared inode.
 """
 import json, os, sys, shutil, time
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
@@ -67,13 +71,16 @@ rel = ((dq - W.float()).norm() / W.float().norm()).item(); del dq; torch.cuda.em
 print(f"GPTQ round-trip rel error {rel:.4f}")
 
 # ---- write variant dir
+# NOTE (F04): never hardlink variant artifacts. build_draft_vocab.py rewrites
+# model_extra_tensors.safetensors and the lm_head shard in place; a hardlink
+# would mutate the SOURCE model dir through the shared inode. Copy instead.
 os.makedirs(D, exist_ok=True)
 for f in os.listdir(S):
     if f.startswith("model-0000") and f.endswith(".safetensors") and f != shard and not os.path.exists(D + f):
-        os.link(S + f, D + f)
+        shutil.copy(S + f, D + f)
 for f in ["tokenizer.json", "model_extra_tensors.safetensors", "mtp_draft_vocab_ids.pt"]:
     if not os.path.exists(D + f):
-        os.link(S + f, D + f)
+        shutil.copy(S + f, D + f)
 for f in ["chat_template.jinja", "generation_config.json", "processor_config.json", "quantization_config.json", "tokenizer_config.json"]:
     shutil.copy(S + f, D + f)
 tensors = {}

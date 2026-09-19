@@ -47,6 +47,10 @@ x-qwen: &qwen
   # local build. `docker compose build` (or `up --build`) still builds the
   # identical image under the same tag name. Immutable per-commit tags:
   # ghcr.io/syv-ai/hyperqwen:sha-<7>.
+  # F12 traceability: the image running here on 2026-09-08 resolved to
+  # ghcr.io/syv-ai/qwen38-27b-rtx3090@sha256:86ecc9adb54ed76f0ccbebbdb7916490f918e42d2ac2a2ed8c0d50cc25323a57.
+  # `latest` is a moving tag — quote the digest, not the tag, when reporting
+  # benchmark provenance (bench/run_benchmarks.sh manifest).
   image: ghcr.io/syv-ai/hyperqwen:latest
   build: .
   pull_policy: missing
@@ -63,7 +67,10 @@ x-qwen: &qwen
 x-serve: &serve
   <<: *qwen
   ports:
-    - "${PORT:-18020}:${PORT:-18020}"
+    # F06: loopback by default. Keyless serving on 0.0.0.0 exposes the server
+    # to the whole network with no auth; opt into that explicitly with
+    # BIND=0.0.0.0 (compose interpolates ${BIND:-127.0.0.1}).
+    - "${BIND:-127.0.0.1}:${PORT:-18020}:${PORT:-18020}"
   depends_on:
     prepare:
       condition: service_completed_successfully
@@ -99,6 +106,54 @@ services:
     <<: *serve
     profiles: [batch]
     command: batch
+
+  # Headroom: OpenAI-compatible compression proxy in front of `single`.
+  # Runs standalone on the compose network with its own published port;
+  # clients point at 127.0.0.1:8787 with the same VLLM_API_KEY. It
+  # compresses/aligns the context (HEADROOM_MODE=cache keeps vLLM prefix-cache
+  # hits stable) and forwards to the vLLM over Docker DNS. CPU-only.
+  # First start downloads Kompress/embedding models from HF, so the
+  # healthcheck allows a long start period.
+  headroom:
+    # F06: opt-in profile. Headroom used to share the `single` profile while
+    # requiring VLLM_API_KEY, so `compose --profile single config` failed with
+    # the key-optional .env.example. Start it explicitly:
+    #   docker compose --profile single --profile headroom up -d
+    profiles: [headroom]
+    image: ghcr.io/headroomlabs-ai/headroom:latest
+    pull_policy: missing
+    depends_on:
+      single:
+        condition: service_healthy
+    # Image entrypoint is already `headroom proxy`, so command supplies flags
+    # only. --host 0.0.0.0 binds the container's eth0, which is what Docker's
+    # publish dials; upstream is the vLLM by service name (env equivalent
+    # below). 8787 straight through, host side via HEADROOM_PORT/BIND.
+    command: ["--host", "0.0.0.0", "--port", "8787", "--openai-api-url", "http://single:${PORT:-18020}"]
+    ports:
+      - "${BIND:-127.0.0.1}:${HEADROOM_PORT:-8787}:8787"
+    environment:
+      HEADROOM_MODE: ${HEADROOM_MODE:-cache}
+      HEADROOM_TELEMETRY: "off"
+      # Proxy auth: keyless-local by default. The publish is host-loopback bound,
+      # so only local processes reach it; set HEADROOM_PROXY_TOKEN to require a
+      # bearer token (browsers cannot send one, which 401s the dashboard).
+      HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:-}
+      # Custom OpenAI-compatible backend: current var is OPENAI_TARGET_API_URL
+      # (OPENAI_BASE_URL is the legacy name; set both, same value).
+      # Docker DNS: reachable because both services share the compose network.
+      # Follows PORT instead of a hardcoded 18020.
+      OPENAI_TARGET_API_URL: http://single:${PORT:-18020}
+      OPENAI_BASE_URL: http://single:${PORT:-18020}
+      OPENAI_API_KEY: ${VLLM_API_KEY:-}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
 
 volumes:
   qwen-cache:

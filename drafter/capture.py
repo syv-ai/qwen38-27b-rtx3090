@@ -49,7 +49,10 @@ def main():
     for s in seqs:
         tok_mm[s["off"]:s["off"] + s["n"]] = np.asarray(s["_ids"], dtype=np.int32)
     tok_mm.flush()
-    json.dump([{k: v for k, v in s.items() if k != "_ids"} for s in seqs], open(f"{D}/seqs.json", "w"))
+    # F14: the manifest is the publication event. Stage it until capture is
+    # proven complete — publishing seqs.json up front lets train_mtp.py run on
+    # a truncated corpus with no trace.
+    json.dump([{k: v for k, v in s.items() if k != "_ids"} for s in seqs], open(f"{D}/seqs.json.staging", "w"))
 
     # ---- hook -------------------------------------------------------------------
     state = {"written": {}, "sched": None, "rows": 0}
@@ -113,6 +116,14 @@ def main():
     hid_mm.flush()
     missing = [k for k, s in enumerate(seqs) if state["written"].get(k, 0) != s["n"]]
     print("done; incomplete sequences:", len(missing), missing[:20])
+    # F14: publish the staged manifest only on proven completeness (and finite
+    # row counts); otherwise fail so no downstream training consumes a partial
+    # corpus. Partial memmaps stay on disk for inspection but are unpublished.
+    if missing:
+        print(f"F14: refusing to publish: {len(missing)} of {len(seqs)} sequences incomplete")
+        raise SystemExit(1)
+    os.replace(f"{D}/seqs.json.staging", f"{D}/seqs.json")
+    print(f"published {D}/seqs.json ({len(seqs)} sequences, {state['rows']} rows)")
 
 
 if __name__ == "__main__":

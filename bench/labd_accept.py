@@ -78,6 +78,9 @@ Usage (on syv, against a server started with SPEC=dflash2):
                                        [--tasks copy,code,edit,quote,summary,qa]
                                        [--base http://127.0.0.1:18020] [--recapture]
                                        [--keep-dirty]
+
+Quality gate (F11): an empty target or zero clean chunks exits 1 with RESULT
+FAIL instead of printing a nominal ~1 tok/step headline.
 """
 import glob
 import hashlib
@@ -88,7 +91,17 @@ import sys
 import time
 import urllib.request
 
-KEY = open(os.path.expanduser("~/qwen-serving/api_key.txt")).read().strip()
+HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
+
+
+def _key(path):  # a key is optional; keyless servers ignore the header
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return ""
+
+
+KEY = os.environ.get("VLLM_API_KEY") or _key(os.path.join(REPO, "api_key.txt"))
 CORPUS = os.path.expanduser("~/bench/labd_corpus.txt")
 TARGETS = os.path.expanduser("~/bench/targets")
 TAG = sys.argv[1] if len(sys.argv) > 1 else "run"
@@ -295,6 +308,17 @@ print(f"LABDACC {TAG} TOTAL forced={tot['forced']:.0f} chunks={tot['clean']:.0f}
       f"steps={tot['steps']:.0f} tok/step={1 + tot['acc'] / steps:.3f} "
       f"slots/step={tot['slots'] / steps:.2f} head={tot['head'] / steps:.2f} "
       f"tail={tot['tail'] / steps:.2f} decode={tot['forced'] / max(tot['dec'], 1e-3):.1f} tok/s")
+# F11: an empty target or zero clean chunks used to print a nominal ~1 tok/step.
+# Fail closed: no clean evidence means no headline number.
+failures = []
+if tot["chunks"] == 0:
+    failures.append("no chunks measured (empty target?)")
+if tot["clean"] == 0:
+    failures.append(f"zero clean chunks of {tot['chunks']} (all diverged)")
+if failures:
+    print(f"LABDACC {TAG} RESULT FAIL: " + "; ".join(failures), flush=True)
+    sys.exit(1)
+print(f"LABDACC {TAG} RESULT PASS", flush=True)
 os.makedirs(os.path.expanduser("~/bench/results"), exist_ok=True)
 json.dump({"tag": TAG, "ctx": CTX, "chunk": CHUNK, "block": BLOCK, "rows": rows,
            "total_tok_per_step": 1 + tot["acc"] / steps,

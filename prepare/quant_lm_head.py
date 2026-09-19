@@ -10,10 +10,15 @@ Usage: python prepare/quant_lm_head.py /path/to/Qwen3.8-27B-W4A16-AutoRound
 
 Rewrites the shard containing lm_head.weight, the safetensors index and
 config.json. Backups are written next to the originals (.bak / .bak-quant).
+
+Publication safety (F04): the rewritten shard, index, and config are each
+written to a temp file and atomically replaced, so an interrupted run cannot
+leave a half-written directory that looks ready.
 """
 
 import copy
 import json
+import os
 import shutil
 import sys
 
@@ -57,13 +62,20 @@ tensors["lm_head.weight_scale"] = scale.squeeze(-1).to(torch.float16).contiguous
 tensors["lm_head.weight_shape"] = torch.tensor([out_f, in_f], dtype=torch.int64)
 
 shutil.copy(d + shard, d + shard + ".bak")
-save_file(tensors, d + shard, metadata=meta or {"format": "pt"})
+# F04: atomic publication — write the new shard to tmp, then replace, so an
+# interrupted run cannot leave a half-written shard that looks ready.
+_tmp_shard = d + shard + ".tmp"
+save_file(tensors, _tmp_shard, metadata=meta or {"format": "pt"})
+os.replace(_tmp_shard, d + shard)
 
 shutil.copy(d + "model.safetensors.index.json", d + "model.safetensors.index.json.bak-quant")
 del wm[KEY]
 for s in ("weight_packed", "weight_scale", "weight_shape"):
     wm[f"lm_head.{s}"] = shard
-json.dump(idx, open(d + "model.safetensors.index.json", "w"), indent=2)
+# F04: atomic index publication.
+_tmp_idx = d + "model.safetensors.index.json.tmp"
+json.dump(idx, open(_tmp_idx, "w"), indent=2)
+os.replace(_tmp_idx, d + "model.safetensors.index.json")
 
 c = json.load(open(d + "config.json"))
 shutil.copy(d + "config.json", d + "config.json.bak-quant")
@@ -87,5 +99,8 @@ g1 = copy.deepcopy(qc["config_groups"]["group_0"])
 g1["targets"] = ["re:.*lm_head$"]
 g1["weights"]["num_bits"] = BITS
 qc["config_groups"]["group_1"] = g1
-json.dump(c, open(d + "config.json", "w"), indent=2)
+# F04: atomic config publication.
+_tmp_cfg = d + "config.json.tmp"
+json.dump(c, open(_tmp_cfg, "w"), indent=2)
+os.replace(_tmp_cfg, d + "config.json")
 print("done")

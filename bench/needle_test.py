@@ -9,6 +9,14 @@ contains the passcode. Complements quality_battery.py's GSM8K lane for the
 Usage:
     python bench/needle_test.py [target_tokens] [depth]
     # default: 100000 tokens, needle at 90% depth
+
+Fail-closed (F02): MISSED exits 1 with RESULT FAIL so CI cannot mistake a
+miss for a pass.
+
+Workload pin (F03): thinking is explicitly OFF. The model template enables
+thinking when the flag is absent, which spends the 32-token budget on
+reasoning and returns empty content — measured as two false MISSES at
+60-100k on 2026-09-08 before the pin; with the pin the same probe retrieves.
 """
 import json
 import os
@@ -59,10 +67,18 @@ resp = post({
     "model": "qwen3.8-27b",
     "messages": [{"role": "user", "content": prompt}],
     "max_tokens": 32,
+    "chat_template_kwargs": {"enable_thinking": False},
 })
 elapsed = time.perf_counter() - t0
 
 answer = (resp["choices"][0]["message"].get("content") or "")
 print(f"context ~{TARGET_TOKENS} tokens, needle at {DEPTH:.0%} depth")
 print(f"elapsed {elapsed:.1f}s, answer: {answer[:120]!r}")
-print("RETRIEVED" if NEEDLE in answer else "MISSED")
+# Fail-closed: a missed needle must fail the process for CI.
+if NEEDLE in answer:
+    print("RETRIEVED")
+    print("RESULT PASS")
+else:
+    print("MISSED")
+    print("RESULT FAIL")
+    sys.exit(1)

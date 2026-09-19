@@ -1,0 +1,20 @@
+# Portable multi-GPU guard (TRACKED: no host specifics inside — the GPU UUID
+# comes from ${GPU_UUID} in .env). The base file's `count: 1` is ignored on
+# Docker Desktop/WSL2 (both cards stay visible), so pin the serving card
+# explicitly. Without this, CUDA device 0 can be the 12 GB 3080 Ti and the
+# 27B server fails its memory gate.
+services:
+  prepare:
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${GPU_UUID:?set GPU_UUID in .env — see nvidia-smi -L}
+
+  single:
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${GPU_UUID:?set GPU_UUID in .env — see nvidia-smi -L}
+
+  batch:
+    environment:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${GPU_UUID:?set GPU_UUID in .env — see nvidia-smi -L}

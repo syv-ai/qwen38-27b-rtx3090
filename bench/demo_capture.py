@@ -24,7 +24,17 @@ import sys
 import time
 import urllib.request
 
-KEY = open(os.path.expanduser("~/qwen-serving/api_key.txt")).read().strip()
+HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
+
+
+def _key(path):  # a key is optional; keyless servers ignore the header
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return ""
+
+
+KEY = os.environ.get("VLLM_API_KEY") or _key(os.path.join(REPO, "api_key.txt"))
 BASE = os.environ.get("DEMO_BASE", "http://127.0.0.1:18020")
 LANE = sys.argv[1] if len(sys.argv) > 1 else "lane"
 OUT = os.path.expanduser(

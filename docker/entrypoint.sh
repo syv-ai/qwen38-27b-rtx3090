@@ -18,6 +18,13 @@ case "$cmd" in
     if [ "${PREPARE:-1}" != "0" ]; then
       bash docker/prepare.sh
     fi
+    # Preparation may create the fast variant. Resolve it now, once, so the
+    # verifier and launcher use the same model; batch retains its base default.
+    if [ "$cmd" = single ]; then
+      REPO=/app
+      source "$REPO/single-user/select_model.sh"
+      export MODEL
+    fi
     if [ "${VERIFY:-1}" != "0" ]; then
       bash verify.sh --no-server || { echo "entrypoint: verify.sh FAILED — fix the above or set VERIFY=0"; exit 1; }
     fi

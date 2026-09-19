@@ -713,6 +713,13 @@ def kvarn_decode_attention(
     cu_seqlens) is precomputed once per batch in ``KVarNMetadataBuilder.build``
     and passed in via ``md`` — no per-layer host→GPU allocations.
 
+    Capacity contract (F07): on the MATERIALIZE route the build-packed-KV
+    kernel writes one scratch row per KV token attended (the sum of the
+    batch's context lengths). The driver proves
+    ``sum(md.seq_lens_cpu) <= scratch rows`` from host-side lengths before
+    launch and raises instead of writing out of bounds; the fused path never
+    materializes and needs no guard.
+
     Output: ``[B, Hq, D]`` in ``query``'s dtype, in the un-rotated frame.
     """
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
@@ -834,6 +841,31 @@ def kvarn_decode_attention(
     else:
         K_packed = impl._fa_K_buf
         V_packed = impl._fa_V_buf
+        # F07 capacity guard: the kernel below writes one packed row per KV
+        # token attended this step (the sum of the batch's context lengths),
+        # but the shared scratch is capped (fa_scratch_rows). An over-capacity
+        # batch used to write out of bounds silently. Prove fit from HOST-side
+        # lengths (md.seq_lens_cpu — no GPU sync in forward) before launch and
+        # fail closed with an actionable error otherwise. The fused path never
+        # materializes, so it needs no guard; the multiquery path already has
+        # the equivalent check in _cached_multiquery_path.
+        _cpu_lens = getattr(md, "seq_lens_cpu", None)
+        if _cpu_lens is None:
+            raise RuntimeError(
+                "kvarn_decode_attention materialize path: no host-side "
+                "seq_lens_cpu on the metadata; refusing to launch the "
+                "build-packed-KV kernel without a proven row bound."
+            )
+        _required = int(sum(_cpu_lens))
+        _allocated = int(K_packed.shape[0])
+        if not cfg.materialize_fits(_required, _allocated):
+            raise RuntimeError(
+                f"kvarn_decode_attention materialize path: batch needs "
+                f"{_required} packed rows but the shared FA scratch holds "
+                f"{_allocated} (KVARN_FA_SCRATCH_CAP={cfg.fa_scratch_cap()}). "
+                f"Raise KVARN_FA_SCRATCH_CAP, reduce batch/context, or leave "
+                f"KVARN_FUSED_DECODE=1 (default) so decode never materializes."
+            )
         with torch.profiler.record_function("kvarn_build_packed_kv"):
             _kvarn_build_packed_kv_kernel[(B * max_blocks_per_req, Hk)](
                 md.block_table, md.seq_lens, md.fa_cu_seqlens_k,

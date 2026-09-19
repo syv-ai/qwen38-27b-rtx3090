@@ -1,5 +1,11 @@
 """Collect a diverse prompt set (EN chat, code, DA instructions, DA reasoning, math) for
-self-distillation data generation. Output: data/prompts.jsonl with {"id","src","messages","think"}."""
+self-distillation data generation. Output: data/prompts.jsonl with {"id","src","messages","think"}.
+
+Split isolation (F08): only GSM8K train-split parquets are eligible. The local
+bench/quality-data/gsm8k dir holds the HELD-OUT test parquet quality_battery.py
+scores on; any path containing 'test' is refused so calibration data can never
+silently include evaluation answers.
+"""
 import json, random, os, glob, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
 import pyarrow.parquet as pq
@@ -112,7 +118,27 @@ for r in sk[:1000]:
 print("skolegpt", min(1000, len(sk)))
 
 # 6) GSM8K train (EN math)
-gs = parquet_rows(os.path.join(REPO, "bench", "quality-data", "gsm8k"), ["question"])
+# F08: calibration must never consume evaluation test data. Only train-split
+# parquets are eligible here; any path with 'test' in it is refused, because
+# bench/quality-data/gsm8k holds the HELD-OUT test parquet quality_battery.py
+# scores on. parquet_rows() used to glob every *.parquet recursively, which
+# silently pulled that test file in when present locally.
+def _train_only(files):
+    # Stricter rule: drop anything with 'test' in the path.
+    return [f for f in files if "test" not in f.lower()]
+_gsm_dir = os.path.join(REPO, "bench", "quality-data", "gsm8k")
+_gsm_all = sorted(glob.glob(f"{_gsm_dir}/**/*.parquet", recursive=True))
+_gsm_train = _train_only(_gsm_all)
+if _gsm_all and not _gsm_train:
+    print("REFUSING calibration from GSM8K: only test parquets present under",
+          _gsm_dir, "-- download main/train-*.parquet instead", file=sys.stderr)
+    sys.exit(1)
+gs = []
+for _f in _gsm_train:
+    try:
+        gs.extend(pq.read_table(_f, columns=["question"]).to_pylist())
+    except Exception as e:
+        print("skip", _f, e)
 if not gs:
     d = dl("openai/gsm8k", ["main/train-*.parquet"])
     gs = parquet_rows(d, ["question"])

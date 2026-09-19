@@ -70,7 +70,7 @@ diff --git a/v1/core/kv_cache_utils.py b/v1/core/kv_cache_utils.py
 index e9a2bf6ae..a46c38df5 100644
 --- a/v1/core/kv_cache_utils.py
 +++ b/v1/core/kv_cache_utils.py
-@@ -1033,6 +1033,135 @@
+@@ -1033,6 +1033,143 @@
      return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
  
  
@@ -141,11 +141,19 @@ index e9a2bf6ae..a46c38df5 100644
 +        ratio = cdiv(max_page_size, spec.page_size_bytes)
 +        new_block_size = spec.block_size * ratio
 +        if primary_block is not None and primary_block % new_block_size != 0:
++            # Both constraints must hold: divide the primary block (scheduler
++            # LCM invariant, kv_cache_coordinator asserts scheduler %
++            # group_block == 0) AND stay a whole multiple of this layer's own
++            # kernel granularity (spec.block_size, 16 for the SW drafter).
++            # Upstream unify scales by whole ratios for the same reason; a
++            # divisor like 460/920 of 1840 satisfies the first but breaks the
++            # second (460 % 16 == 12, 920 % 16 == 8) and dies downstream or
++            # mis-aligns KV pages.
 +            divisor = next(
 +                (
 +                    d
 +                    for d in range(new_block_size, primary_block + 1)
-+                    if primary_block % d == 0
++                    if primary_block % d == 0 and d % spec.block_size == 0
 +                ),
 +                None,
 +            )
@@ -206,7 +214,7 @@ index e9a2bf6ae..a46c38df5 100644
  def unify_kv_cache_spec_page_size(
      kv_cache_spec: dict[str, KVCacheSpec],
  ) -> dict[str, KVCacheSpec]:
-@@ -1060,6 +1189,12 @@
+@@ -1060,6 +1197,12 @@
          return kv_cache_spec
  
      max_page_size = max(page_sizes)

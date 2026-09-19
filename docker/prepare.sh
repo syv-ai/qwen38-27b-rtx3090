@@ -70,13 +70,20 @@ for step in $TODO; do
                || echo "prepare: DFlash2 drafter not fetched (optional: SPEC=dflash2 unavailable; DFLASH2=0 silences this)" ;;
   esac
 done
+# Every dir this script prepares, plus the model actually served (MODEL) when
+# it was prepared elsewhere. An array, so a path containing a space works.
+DIRS=("$BASE")
+[ -d "$BASE-fast" ] && DIRS+=("$BASE-fast")
+if [ -n "${MODEL:-}" ] && [ -d "$MODEL" ] && [ "$MODEL" != "$BASE" ] && [ "$MODEL" != "$BASE-fast" ]; then
+  DIRS+=("$MODEL")
+fi
 # Some clients (JetBrains AI Assistant) send tool-call arguments as a JSON
 # array instead of an object; harden the templates so `|items` does not blow up
 # ("Can only get item pairs from a mapping.") once for every prepared model.
 # A template that does not match the known pattern warns and is left alone;
 # only an unreadable one fails prepare. HARDEN_TEMPLATES=0 skips the step.
 if [ "${HARDEN_TEMPLATES:-1}" != "0" ]; then
-  python prepare/harden_chat_template.py
+  python prepare/harden_chat_template.py "${DIRS[@]}"
 fi
 # Gotcha 58: the shipped chat template accepts only xhigh/medium/low, so the
 # gpt-5 vocabulary clients speak (`minimal`, `high`, `max`) raises inside the
@@ -91,11 +98,6 @@ fi
 # A template whose effort block matches no known shape warns and is left alone;
 # TRANSLATE_EFFORT=0 skips the step.
 if [ "${TRANSLATE_EFFORT:-1}" != "0" ]; then
-  DIRS=("$BASE")
-  [ -d "$BASE-fast" ] && DIRS+=("$BASE-fast")
-  if [ -n "${MODEL:-}" ] && [ -d "$MODEL" ] && [ "$MODEL" != "$BASE" ] && [ "$MODEL" != "$BASE-fast" ]; then
-    DIRS+=("$MODEL")
-  fi
   python prepare/translate_chat_template.py "${DIRS[@]}"
 fi
 LEFT=$(state | sed 's/\bdflash2\b//')

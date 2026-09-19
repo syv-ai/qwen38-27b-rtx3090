@@ -2,6 +2,7 @@ __pycache__/
 api_key.txt
 bench/quality-data/
 bench/results/
+bench/results-prefill-ab/
 models/
 profiles/
 qwen.log
@@ -9,8 +10,33 @@ venv/
 drafter/data/
 drafter/runs/
 .env
-# local reproduction artifacts (symlinks here, so no trailing slash)
-venv
-models
-api_key.txt
-bench/results/
+# NOTE: docker-compose.override.yml is TRACKED (portable, no host specifics).
+# Host-local overrides belong in docker-compose.override.local.yml (also ignored).
+docker-compose.override.local.yml
+.env.hf
+.quant_checkpoint/
+prepare/logs/
+quant.log
+# Local/working docs stay uncommitted: only the docs tracked in upstream/main
+# are versioned. New local docs (investigation notes, handoffs, plans) are
+# ignored by default; anything meant for the repo must be added to the
+# allowlist below AND committed deliberately.
+docs/*
+!docs/MR-DRAFT.md
+!docs/docker.md
+!docs/gotchas.md
+!docs/long-context.md
+!docs/media/
+!docs/optimizations.md
+!docs/python-314.md
+!docs/quality.md
+!docs/reproductions/
+!docs/spec-decode-scratch-token-units.md
+!docs/ubuntu-3090.md
+!docs/wsl2-4090.md
+# Host-specific env (Windows/WSL paths, local CUDA layout) — never commit.
+.env.host
+# Eval run outputs (timestamped results/samples) — regenerate, don't version.
+evals/
+# Scratch handoff docs — working notes, not repo history.
+handoff-*.md

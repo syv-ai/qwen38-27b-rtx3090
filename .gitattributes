@@ -2,3 +2,12 @@
 # container image via `COPY . .`), so CRLF working trees break it. Force LF
 # regardless of the cloning machine's core.autocrlf.
 * text=auto eol=lf
+# Explicit: launchers and patches must stay LF + diffable.
+*.sh text eol=lf
+*.patch text diff
+# Model/training artifacts must never get line-ending conversion or text diffs
+# if one is ever force-added for inspection.
+*.safetensors binary
+*.pt binary
+*.npy binary
+*.mmap binary

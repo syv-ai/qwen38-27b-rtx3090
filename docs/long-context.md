@@ -461,3 +461,42 @@ Measured on an RTX 4090 (24 GB) with `bench/quality_battery.py int4kv --gsm-only
 the other configurations read (95.0-96.5%, docs/quality.md). Tool calling
 round-trips correctly and the lookup lane works; the rest of this configuration
 is still experimental.
+
+## Vision serving on one 3090 (`VISION=1 SPEC=dflash2 CTX=long`)
+
+The 0.85 GiB tower fits resident next to the full pool. Measured 2026-09-16 on the W4A16
+uncensored quant, DFlash2 k=7, int8 KV, TRITON_ATTN, `GPU_UTIL=0.88`:
+
+| `MAX_LEN` | `KV_MEM` pin | result |
+|---|---|---|
+| 131072 (profile default) | 5583457484 (5.2 GiB) | boots, vision live (`SEEN` on image input) |
+| 98304 | 4529848320 (4.2 GiB) | boots, tower fits |
+| 65536 | 3758096384 (3.5 GiB) | boots, tower fits |
+| 98304 | 5583457484 (5.2 GiB, oversized) | boots, short prompts avg ~84 tok/s |
+
+Rules found the hard way:
+
+- `VISION_OFFLOAD=0`. The offload path pins each tower module with `pin_memory()` in
+  `wrap_modules` (`vllm/model_executor/offloader/uva.py`), and that call OOMs on WSL2 even
+  with gigabytes free. Resident (0.85 GiB) just works.
+- Do not set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` on WSL2. It breaks the Marlin
+  custom ops during weight processing (`CUDA driver error: device not ready` right after the
+  shards load). The default (False on WSL2) is correct here.
+- A pool smaller than the context need refuses to boot (`KV cache needed larger than
+  available`), it does not slow down. Note: a 16 tok/s episode during tuning resolved after
+  restoring the full 5.2 GiB pin (short prompts back to ~84 tok/s avg); the mechanism is not
+  fully understood, so keep the full pin unless the tower needs the room.
+- `.env` for this setup: `VISION=1`, `VISION_OFFLOAD=0`, `MAX_LEN=98304`,
+  `KV_MEM=5583457484`, `GPU_UTIL=0.88`, `SPEC=dflash2`, `CTX=long`.
+
+## Long re-baseline, 2026-09-16 night (`CTX=long`, profile defaults, vision on)
+
+Short story probe, idle box, thinking off: **76.8 tok/s** (221 tokens in 2.9 s), clearing
+the 65 tok/s bar. Fast mode on the same model and drafter managed only 17 to 19 tok/s
+idle, so the per-forward cost there is the open question, not speculation (acceptance
+sits near one third in both modes) and not the pool (full pin in both).
+
+Boot lesson: the 131k plus resident tower fit is marginal. One boot OOMed allocating
+12 MiB with 23.12 GiB held by PyTorch; the identical config booted clean on retry.
+That matches the launcher's note that the profiled activation peak swings about
+1 GiB between starts. If a boot OOMs at the margin, retry before resizing.

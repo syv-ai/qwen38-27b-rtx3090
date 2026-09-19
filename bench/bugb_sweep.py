@@ -16,6 +16,8 @@ this reads as a threshold, which is how it was first (mis)diagnosed.
 
 To sweep every residue rather than lengths you picked, use bench/residue_sweep.py --
 five hand-picked lengths miss a 1-in-128 break 96% of the time.
+
+Fail-closed (F02): any broken length exits 1 with RESULT FAIL.
 """
 import json, os, sys, urllib.request
 
@@ -40,12 +42,13 @@ TOK = AutoTokenizer.from_pretrained(os.path.join(REPO, "models", "Qwen3.8-27B-W4
 
 
 def metrics():
+    # Sum over engines/label series (see labd_bench.py): overwrite drops series.
     req = urllib.request.Request(BASE + "/metrics", headers={"Authorization": "Bearer " + KEY})
     d = {}
     for line in urllib.request.urlopen(req).read().decode().splitlines():
         for k in ("vllm:spec_decode_num_drafts_total", "vllm:spec_decode_num_accepted_tokens_total"):
             if line.startswith(k + " ") or line.startswith(k + "{"):
-                d[k] = float(line.split()[-1])
+                d[k] = d.get(k, 0.0) + float(line.split()[-1])
     return d.get("vllm:spec_decode_num_drafts_total", 0.0), d.get("vllm:spec_decode_num_accepted_tokens_total", 0.0)
 
 
@@ -103,3 +106,8 @@ if len(rows) >= 5:
     print(f"\nneighbourhood coverage (median of {len(rows)}): {ref:.2f}")
     print(f"{len(bad)} broken of {len(rows)} lengths"
           + ("" if not bad else "  -> " + ", ".join(f"residue {r} ({w})" for r, w in bad)))
+# Fail-closed: broken lengths must fail the process for CI.
+if len(rows) >= 5 and bad:
+    print("RESULT FAIL")
+    sys.exit(1)
+print("RESULT PASS")

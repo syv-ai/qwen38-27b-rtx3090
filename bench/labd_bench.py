@@ -17,6 +17,10 @@ about --ctx 65000 silently measures a shorter prompt than you asked for; labd_co
 is the same text followed by vLLM source (varied, so a suffix lookup gets no free matches
 from a repeated section) and its first 244,038 characters are byte-identical, which keeps
 every number taken at --ctx 20000 comparable.
+
+Corpus contract (F11): stream usage with completion_tokens is required — chunk
+counts are never reported as tokens (missing usage exits 1). Metrics are summed
+over engines/label series (F02).
 """
 import glob
 import json
@@ -25,7 +29,17 @@ import sys
 import time
 import urllib.request
 
-KEY = open(os.path.expanduser("~/qwen-serving/api_key.txt")).read().strip()
+HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
+
+
+def _key(path):  # a key is optional; keyless servers ignore the header
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return ""
+
+
+KEY = os.environ.get("VLLM_API_KEY") or _key(os.path.join(REPO, "api_key.txt"))
 BASE = "http://127.0.0.1:18020"
 TAG = sys.argv[1] if len(sys.argv) > 1 else "run"
 
@@ -40,12 +54,14 @@ MAXTOK = int(arg("--max-tokens", 512))
 
 
 def metrics():
+    # Sum over engines/label series: overwriting instead of summing silently
+    # drops all but the last series on multi-engine servers.
     req = urllib.request.Request(BASE + "/metrics", headers={"Authorization": "Bearer " + KEY})
     d = {}
     for line in urllib.request.urlopen(req).read().decode().splitlines():
         for k in ("vllm:spec_decode_num_drafts_total", "vllm:spec_decode_num_accepted_tokens_total"):
             if line.startswith(k + " ") or line.startswith(k + "{"):
-                d[k] = float(line.split()[-1])
+                d[k] = d.get(k, 0.0) + float(line.split()[-1])
     return (d.get("vllm:spec_decode_num_drafts_total", 0.0),
             d.get("vllm:spec_decode_num_accepted_tokens_total", 0.0))
 
@@ -126,7 +142,14 @@ for name, q in TASKS:
     d1, a1 = metrics()
     steps = d1 - d0
     tps = 1 + (a1 - a0) / max(steps, 1)
-    out = usage.get("completion_tokens", n_chunks)
+    # F11: chunk count is not a token count. Usage is required (stream_options
+    # include_usage is set above); fall back only to an explicit INVALID exit.
+    if "completion_tokens" not in usage:
+        print(f"LABD {TAG} {name:8s} RESULT FAIL: stream usage missing "
+              f"completion_tokens — refusing to report chunk counts as tokens",
+              flush=True)
+        sys.exit(1)
+    out = usage["completion_tokens"]
     ttft = (t_first or t_end) - t0
     decode = (out - 1) / max(t_end - (t_first or t_end), 1e-3)
     e2e = out / max(t_end - t0, 1e-3)

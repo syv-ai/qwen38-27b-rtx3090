@@ -10,6 +10,16 @@ permissions:
   contents: read
 
 jobs:
+  model-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check model verification and selection without a GPU
+        run: python bench/test_model_verification.py
+
   git-apply:
     runs-on: ubuntu-latest
     steps:
@@ -29,6 +39,12 @@ jobs:
           ref: ${{ steps.pin.outputs.tag }}
           path: .ci/vllm
           fetch-depth: 1
+
+      # check_vllm_series.sh resets its target tree (git checkout + clean),
+      # so it only runs against a checkout carrying this sentinel (or with
+      # ALLOW_TREE_RESET=1). The .ci/vllm checkout is throwaway CI scratch.
+      - name: Mark disposable series target
+        run: touch .ci/vllm/.qwen-disposable-series-target
 
       - name: Validate patch series with git apply
         run: bash patches/check_vllm_series.sh .ci/vllm/vllm

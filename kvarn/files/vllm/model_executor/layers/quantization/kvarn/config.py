@@ -316,6 +316,14 @@ class KVarNConfig:
                    min(max_model_len, cap), 4096)
 
     @staticmethod
+    def materialize_fits(total_kv_tokens: int, allocated_rows: int) -> bool:
+        """F07 capacity predicate for the materialize path: the
+        build-packed-KV kernel writes one scratch row per KV token attended
+        in the step (the sum of the batch's context lengths). Launch is only
+        safe when every written row exists. Boundary (==) fits."""
+        return 0 <= total_kv_tokens <= allocated_rows
+
+    @staticmethod
     def num_kvarn_layers(model_config, parallel_config) -> int:
         """Number of layers the KVarN fp16 tail pool actually spans = the
         full-attention layers. On a hybrid model (Qwen3.5/3.6, Jamba, ...) the

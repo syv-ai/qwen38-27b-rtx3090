@@ -10,7 +10,10 @@
 # that only happens once.
 #
 #   docker compose --profile single up -d      (see docs/docker.md)
-FROM nvidia/cuda:13.0.3-base-ubuntu24.04
+#
+# F12: the base is pinned by digest, not just tag — a mutable tag would let a
+# rebuilt base change image contents under the same commit tag.
+FROM nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1
 
 ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \

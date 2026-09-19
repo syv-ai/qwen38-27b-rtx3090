@@ -2,7 +2,11 @@
 (patches/spec-decode-attn.patch) against vLLM's FlashAttention-2 call, including the
 long query blocks lookup-augmented drafting asks for (16 and 32 tokens per request).
 Run inside the vLLM venv on the GPU after applying the patch:
-  venv/bin/python bench/test_spec_decode_attn.py"""
+  venv/bin/python bench/test_spec_decode_attn.py
+
+Fail-closed (F02): any case beyond tolerance exits 1 with RESULT FAIL instead
+of printing FAIL and continuing to timing.
+"""
 import sys, os, time, math
 import torch
 from vllm.v1.attention.ops.spec_decode_attn import SpecDecodeAttention
@@ -63,6 +67,7 @@ def bench(fn, iters=200):
 
 att = SpecDecodeAttention(max_num_reqs=64, num_heads=Hq, head_dim=D, device=dev, qmax=64)
 print("correctness")
+n_fail = 0
 for kv_lens, q_len in [([1500], 5), ([37, 1000, 4321], 5), ([16000], 1), ([700, 8], 8), ([432], 5),
                        ([433, 431], 3), ([1500], 16), ([2000, 300], 16), ([9000], 21), ([1500], 22),
                        ([25000], 32), ([600, 4000], 32), ([1000], 64)]:
@@ -74,7 +79,13 @@ for kv_lens, q_len in [([1500], 5), ([37, 1000, 4321], 5), ([16000], 1), ([700, 
     flash_attn_varlen_func(q=q, k=kc, v=vc, out=fa, cu_seqlens_q=cu, max_seqlen_q=q_len, seqused_k=seqused,
                            max_seqlen_k=max(kv_lens), softmax_scale=scale, causal=True, block_table=bt, fa_version=2)
     err = (out.float() - r).abs().max().item(); err_fa = (fa.float() - r).abs().max().item()
-    print(f"  kv={kv_lens} q={q_len}: max|ours-ref|={err:.4f}  max|FA-ref|={err_fa:.4f}  {'OK' if err < 0.05 else 'FAIL'}")
+    ok = err < 0.05
+    n_fail += 0 if ok else 1
+    print(f"  kv={kv_lens} q={q_len}: max|ours-ref|={err:.4f}  max|FA-ref|={err_fa:.4f}  {'OK' if ok else 'FAIL'}")
+if n_fail:
+    print(f"RESULT FAIL ({n_fail} cases exceeded tolerance)")
+    sys.exit(1)
+print("RESULT PASS")
 
 print("timing (us) per attention layer, batch=1")
 print(f"  {'kv':>7s} {'q_len':>5s} {'ours':>8s} {'FA2':>8s}")

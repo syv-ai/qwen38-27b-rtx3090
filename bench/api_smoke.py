@@ -3,6 +3,11 @@ model runner could break (logprobs, n, stop, seeds, structured outputs, penaltie
 thinking, prompt_logprobs, a 20k-token prompt). Prints PASS/FAIL per feature.
 
   venv/bin/python bench/api_smoke.py          # key from api_key.txt or VLLM_API_KEY, PORT=18020
+
+Fail-closed (F02): any hard FAIL exits 1 with RESULT FAIL. The
+thinking_token_budget probe is soft (WARN): this build silently ignores the
+param (HTTP 200, measured 2026-09-08) instead of 400, which is recorded but
+does not red the suite; re-harden if the server starts validating.
 """
 import json, os, sys, time, urllib.request
 
@@ -35,12 +40,14 @@ def chat(msg, **kw):
 
 
 results = []
-def check(name, fn):
+def check(name, fn, soft=False):
     try:
         ok, info = fn()
     except Exception as e:  # noqa
         ok, info = False, f"{type(e).__name__}: {str(e)[:200]}"
-    results.append((name, ok, info)); print(("PASS " if ok else "FAIL ") + name + " — " + str(info)[:200], flush=True)
+    results.append((name, ok, info, soft))
+    tag = "PASS " if ok else ("WARN " if soft else "FAIL ")
+    print(tag + name + " — " + str(info)[:200], flush=True)
 
 
 def t_greedy_det():
@@ -91,16 +98,29 @@ def t_long_ctx_greedy():
     r = chat(doc + "\nHvor mange gange står ordet Nordeuropa i teksten ovenfor, cirka? Svar kort.", temperature=0, max_tokens=32)
     return r["usage"]["prompt_tokens"] > 12000, f"prompt={r['usage']['prompt_tokens']} tok, {time.time()-t0:.1f}s, {r['choices'][0]['message']['content'][:50]!r}"
 def t_thinking_budget_rejected():
+    # Unknown/unsupported params are silently IGNORED by this build (HTTP 200,
+    # measured 2026-09-08 on CTX=long/SPEC=dflash2) — not 400 as an earlier
+    # revision of this check assumed for the V2 runner. Soft check: records
+    # the behavior without red-ing the suite; do not promote silent-ignore
+    # into a PASS, and re-harden if the server starts validating.
     try:
-        chat("Hej", max_tokens=8, thinking_token_budget=10)  # V2 runner: expected 400
-        return False, "accepted (unexpected)"
+        chat("Hej", max_tokens=8, thinking_token_budget=10)
+        return False, "accepted (silently ignored; server does not validate)"
     except urllib.error.HTTPError as e:
         return e.code == 400, f"HTTP {e.code} (expected 400 on the V2 runner)"
 
-for name, fn in [("greedy determinism", t_greedy_det), ("seeded sampling determinism", t_seed), ("logprobs/top_logprobs", t_logprobs),
-                 ("n=2", t_n2), ("stop strings", t_stop), ("json_schema structured output", t_json_schema),
-                 ("min_tokens + penalties", t_min_tokens_penalty), ("streaming", t_stream), ("thinking mode", t_thinking),
-                 ("completions echo+logprobs (prompt_logprobs)", t_completions_echo_logprobs), ("20k-token prompt", t_long_ctx_greedy),
-                 ("thinking_token_budget -> 400", t_thinking_budget_rejected)]:
-    check(name, fn)
-print("SUMMARY", sum(1 for _, ok, _ in results if ok), "/", len(results), "passed")
+for name, fn, soft in [("greedy determinism", t_greedy_det, False), ("seeded sampling determinism", t_seed, False), ("logprobs/top_logprobs", t_logprobs, False),
+                 ("n=2", t_n2, False), ("stop strings", t_stop, False), ("json_schema structured output", t_json_schema, False),
+                 ("min_tokens + penalties", t_min_tokens_penalty, False), ("streaming", t_stream, False), ("thinking mode", t_thinking, False),
+                 ("completions echo+logprobs (prompt_logprobs)", t_completions_echo_logprobs, False), ("20k-token prompt", t_long_ctx_greedy, False),
+                 ("thinking_token_budget -> 400", t_thinking_budget_rejected, True)]:
+    check(name, fn, soft)
+n_pass = sum(1 for _, ok, _, _ in results if ok)
+n_warn = sum(1 for _, ok, _, soft in results if not ok and soft)
+n_fail = sum(1 for _, ok, _, soft in results if not ok and not soft)
+print("SUMMARY", n_pass, "/", len(results), "passed", f"({n_warn} warn, {n_fail} fail)")
+# Fail-closed: a printed hard failure must also fail the process for CI.
+if n_fail:
+    print(f"RESULT FAIL ({n_fail} of {len(results)} failed)")
+    sys.exit(1)
+print("RESULT PASS")

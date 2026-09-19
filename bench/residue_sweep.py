@@ -17,6 +17,8 @@ The same residue has produced an empty answer, a one-character answer and 400 to
 confident derailment on three different configurations; see bench/verbatim.py.
 
   venv/bin/python bench/residue_sweep.py <label> [start] [count]
+
+Fail-closed (F02): any broken residue exits 1 with RESULT FAIL.
 """
 import hashlib, json, os, re, sys, urllib.request
 
@@ -105,3 +107,8 @@ for res, real, cov, d in seen:
 print(f"[{LABEL}] neighbourhood coverage (median of {len(seen)}): {ref:.2f}")
 print(f"[{LABEL}] DONE: {len(bad)} broken of {COUNT} residues"
       + ("" if not bad else "  -> " + ", ".join(f"{r} ({w})" for r, w in bad)), flush=True)
+# Fail-closed: broken residues must fail the process for CI.
+if bad:
+    print(f"[{LABEL}] RESULT FAIL")
+    sys.exit(1)
+print(f"[{LABEL}] RESULT PASS")

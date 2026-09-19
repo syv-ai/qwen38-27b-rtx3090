@@ -217,7 +217,10 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 21. **`torch.cuda.is_current_stream_capturing()` is not a usable guard on this path.** It
     reads True inside the captured draft pass — which is correct, and exactly why a guard
     written as `if not is_current_stream_capturing():` silently disables the code it guards
-    for the entire run, not just during warm-up.
+    for the entire run, not just during warm-up. Scope (2026-09-17): this is about code
+    *inside* the captured draft pass (`_generate_draft`). `prepare_dflash_inputs` is called
+    from `propose()` outside the capture region, so a guard there never fires — see
+    `patch-investigation/dflash2-dspark-patches.md` §4(a).
 22. **rsync preserves mtimes, and Python trusts mtimes.** Copying a source file into
     `site-packages` with `rsync -a` can leave the `.pyc` newer than the `.py`, in which case
     the interpreter keeps running the old bytecode and every measurement lands on the

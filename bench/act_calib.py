@@ -7,8 +7,13 @@ a sorted listing.
 Use it to pick INT8_LAYERS for batch/start_qwen.sh: layers with small error are
 safe to run with int8 activations, the rest cost perplexity. On Qwen3.8-27B the
 GDN in_proj (early layers) and down_proj (last layers) are the worst.
-Usage: PATH=venv/bin:$PATH VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_USE_FLASHINFER_SAMPLER=0 \
-       python bench/act_calib.py models/Qwen3.8-27B-W4A16-AutoRound act_calib.json
+ Usage: PATH=venv/bin:$PATH VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_USE_FLASHINFER_SAMPLER=0 \
+        python bench/act_calib.py models/Qwen3.8-27B-W4A16-AutoRound act_calib.json
+
+Split isolation (F08): calibrates on TRAIN splits only — the wikitext-2,
+fineweb-2, and GSM8K TEST splits are the held-out evaluation sets
+quality_battery.py scores, so any calibration path containing 'test' is
+refused rather than silently contaminating the weights.
 """
 import json, os, sys, glob, re, torch
 import pyarrow.parquet as pq
@@ -85,10 +90,22 @@ print("hooked layers:", count, flush=True)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 Q = os.environ.get("QUALITY_DATA", os.path.join(HERE, "quality-data"))
+# F08: calibration must not consume evaluation test data. quality_battery.py
+# scores wikitext-2 TEST, fineweb-2 dan_Latn TEST, and GSM8K TEST, so this
+# harness calibrates on TRAIN splits only. Override with ACT_CALIB_* env vars;
+# any path containing 'test' is refused.
+def _refuse_test(path):
+    if "test" in path.lower():
+        print(f"REFUSING calibration from evaluation path: {path}", file=sys.stderr)
+        sys.exit(1)
+    return path
+WIKI = os.environ.get("ACT_CALIB_WIKI", f"{Q}/wikitext/wikitext-2-raw-v1/train-00000-of-00001.parquet")
+FW2 = os.environ.get("ACT_CALIB_FINEWEB", f"{Q}/fineweb2/data/dan_Latn/train/000_00000.parquet")
+_refuse_test(WIKI); _refuse_test(FW2)
 texts = []
-t = "".join(pq.read_table(f"{Q}/wikitext/wikitext-2-raw-v1/test-00000-of-00001.parquet").column("text").to_pylist())
+t = "".join(pq.read_table(_refuse_test(WIKI)).column("text").to_pylist())
 texts += [t[i:i+3000] for i in range(0, 8*3000, 3000)]
-tb = pq.read_table(f"{Q}/fineweb2/data/dan_Latn/test/000_00000.parquet", columns=["text"]).column("text").to_pylist()
+tb = pq.read_table(_refuse_test(FW2), columns=["text"]).column("text").to_pylist()
 texts += [d[:3000] for d in tb if len(d) > 3000][:8]
 code = sorted(glob.glob(os.path.join(HERE, "..", "venv/lib/python3.12/site-packages/vllm/v1/core/*.py")))
 texts += [open(f).read()[:3000] for f in code[:6]]
